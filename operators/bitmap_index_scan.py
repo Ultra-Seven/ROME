@@ -16,4 +16,4 @@ class BitmapIndexScan(Node):
             self.f_mean = 0 if self.card_product == 0 else self.plan_rows / self.card_product
 
     def __str__(self):
-        return f"[{self.node_type}]: {self.relation_name}"
+        return f"[{self.node_type}]:\n{self.index_name}"

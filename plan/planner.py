@@ -18,7 +18,7 @@ class Planner:
         self.nr_threads = nr_threads
         self.policy = method
         self.optimized_policy = "monte_carlo"
-        self.verbose = True
+        self.verbose = False
         self.topk = int(topk)
         self.max_para = max_para
         self.nr_blocks = int(nr_blocks)
@@ -131,7 +131,6 @@ class Planner:
         except AttributeError as e:
             print('Encountered an attribute error: ' + str(e))
         return optimal_arms
-
 
     def greedy_max_accurate_plan(self, plan_trees, nr_threads=24):
         optimal_arms = []
@@ -258,6 +257,7 @@ class Planner:
             plan_val_list = sorted(list(plan_maps[p_key]), key=lambda m: plan_trees[m].root.total_cost)
             if len(plan_maps[p_key]) > 1:
                 removed_plans = removed_plans + plan_val_list[1:]
+        print("Remaining plans: ", set(range(0, 6)).difference(removed_plans))
         if self.optimized_policy == "monte carlo":
             optimal_arms = self.monte_carlo_method(removed_plans)
         else:
@@ -307,8 +307,8 @@ class Planner:
                 plan_to_results[arm_idx] += f_node.d_mean
                 if f_key not in f_keys_to_plans:
                     f_keys_to_plans[f_key] = []
-                    # f_keys_to_dists[f_key] = (f_node.d_mean, f_node.d_std)
-                    f_keys_to_dists[f_key] = (f_node.d_mean, f_node.b_std)
+                    f_keys_to_dists[f_key] = (f_node.d_mean, f_node.d_std)
+                    # f_keys_to_dists[f_key] = (f_node.d_mean, f_node.b_std)
                 f_keys_to_plans[f_key].append(arm_idx)
 
         plan_sets_to_f_keys = {}

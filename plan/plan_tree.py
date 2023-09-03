@@ -27,7 +27,8 @@ from visitors.predicate_visitor import PredicateVisitor
 
 
 class PlanTree:
-    def __init__(self, sql, result, postgres, visualization=True):
+    def __init__(self, sql, result, postgres,
+                 visualization=True, pid=-1, query_name="default"):
         self.decoded_plan = result.stdout.decode('utf-8')
         # print(self.decoded_plan)
         query_plan = json.loads(self.decoded_plan)
@@ -40,6 +41,8 @@ class PlanTree:
         self.d_visitor = IntermediateVisitor(postgres)
         self.p_visitor = PredicateVisitor(postgres, sql)
         self.root = self.generate_intermediate_tables(query_plan[0]["Plan"])
+        self.pid = pid
+        self.query_name = query_name
         # Visualize the plan tree
         if visualization:
             self.visualize()
@@ -137,14 +140,13 @@ class PlanTree:
         visual_style["edge_curved"] = False
         # Set the layout
         visual_style["layout"] = layout
-        ig.plot(g, target='check.pdf', **visual_style)
-        sys.exit(0)
+        ig.plot(g, target=f'./figs/{self.query_name}_{self.pid}.pdf', **visual_style)
 
     def add_edges(self, node, g, nid, added_vertices):
         c = "{:.2e}".format(node.cost)
         g.vs[nid]["label"] = f"{node}"
         g.vs[nid]["shape"] = "rectangle"
-        g.vs[nid]["height"] = 60
+        g.vs[nid]["height"] = 40
         nr_l = 15
         g.vs[nid]["width"] = nr_l * 3
 

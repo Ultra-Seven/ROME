@@ -61,4 +61,4 @@ class Node(ABC):
         pass
 
     def __str__(self):
-        return f"[{self.node_type}]"
+        return f"[{self.node_type}]:\nM:{self.d_mean}\nV:{round(self.d_std, 1)}\nC:{round(self.total_cost, 1)}"

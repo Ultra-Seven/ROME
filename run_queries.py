@@ -109,7 +109,8 @@ def parse_postgres_plan(plan):
     return cost
 
 
-def find_arms(sql, postgres, full=False, method_name="max_results", nr_parallelism=3):
+def find_arms(sql, postgres, full=False,
+              method_name="max_results", nr_parallelism=3, query_name="default"):
     plan_trees = {}
     if full:
         nr_arms = 2 ** len(_ALL_OPTIONS)
@@ -129,9 +130,8 @@ def find_arms(sql, postgres, full=False, method_name="max_results", nr_paralleli
         result = subprocess.run(['psql', '-h', 'localhost',
                                  '-U', 'postgres', '-d', database, '-XqAt', '-c', target_sql],
                                 stdout=subprocess.PIPE)
-        # if x == 1 or x == 4:
-        #     plan_trees[x] = PlanTree(result, postgres, visualization=False)
-        plan_trees[x] = PlanTree(sql, result, postgres, visualization=False)
+        plan_trees[x] = PlanTree(sql, result, postgres,
+                                 visualization=True, pid=x, query_name=query_name)
     planner = Planner(plan_trees, postgres, 24, topk, blocks, method_name, nr_parallelism)
     plan_start = time()
     optimal_arms = planner.optimal_arms(plan_trees)
@@ -319,14 +319,14 @@ def run_baseline_query(sql, nr_threads):
     return stop - start
 
 
-def benchmark(method_name, nr_parallelism, use_psql, nr_runs=3):
+def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
     queries = []
     BASELINE = False
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
     postgres.close()
     for fp in os.listdir(query_dir):
         # if fp.endswith(".sql"):
-        if fp.endswith(".sql"):
+        if fp.endswith(".sql") and fp in ["28a.sql"]:
             with open(os.path.join(query_dir, fp)) as f:
                 query = f.read()
                 queries.append((fp, query))
@@ -344,7 +344,7 @@ def benchmark(method_name, nr_parallelism, use_psql, nr_runs=3):
                 try:
                     if BASELINE:
                         q_time = run_baseline_query(q, total_threads)
-                        # query_name = fp.split("/")[-1].split(".")[0]
+                        query_name = fp.split("/")[-1].split(".")[0]
                         spamwriter.writerow([str(idx), 24, fp,
                                              str(q_time), "", 0, 0])
                         print(idx, 24, fp, q_time, "", 0, flush=True)
@@ -353,11 +353,13 @@ def benchmark(method_name, nr_parallelism, use_psql, nr_runs=3):
                         if use_psql:
                             arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
-                                                                nr_parallelism=nr_parallelism-1)
+                                                                nr_parallelism=nr_parallelism-1,
+                                                                query_name=query_name)
                         else:
                             arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
-                                                                nr_parallelism=nr_parallelism)
+                                                                nr_parallelism=nr_parallelism,
+                                                                query_name=query_name)
                         arm_nr_threads = (total_threads // len(arms))
                         print(fp, arms)
                         q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
@@ -400,7 +402,7 @@ def selectivity_analysis():
             print(idx, fp, flush=True)
 
 
-def bench_optimal(full=Falsde):
+def bench_optimal(full=False):
     queries = []
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
     postgres.close()
