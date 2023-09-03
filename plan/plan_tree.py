@@ -1,4 +1,5 @@
 import json
+import os
 import re
 import sys
 
@@ -140,7 +141,9 @@ class PlanTree:
         visual_style["edge_curved"] = False
         # Set the layout
         visual_style["layout"] = layout
-        ig.plot(g, target=f'./figs/{self.query_name}_{self.pid}.pdf', **visual_style)
+        if not os.path.exists(f'./figs/{self.query_name}'):
+            os.mkdir(f'./figs/{self.query_name}')
+        ig.plot(g, target=f'./figs/{self.query_name}/{self.pid}.pdf', **visual_style)
 
     def add_edges(self, node, g, nid, added_vertices):
         c = "{:.2e}".format(node.cost)
