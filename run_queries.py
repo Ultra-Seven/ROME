@@ -18,7 +18,7 @@ from plan.plan_tree import PlanTree
 from plan.planner import Planner
 import psutil
 
-from utils.sql_utils import extract_tables
+from utils.sql_utils import extract_tables, get_join_predicates
 
 query_dir = sys.argv[1]
 database = sys.argv[2]
@@ -340,11 +340,11 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
                                     quotechar='|', quoting=csv.QUOTE_MINIMAL)
             spamwriter.writerow(["Idx", "Threads", "Query", "Time", "Arms", "PlanTime", "Nr_IMs"])
             for idx, (fp, q) in enumerate(queries):
+                query_name = fp.split("/")[-1].split(".")[0]
                 # if True:
                 try:
                     if BASELINE:
                         q_time = run_baseline_query(q, total_threads)
-                        query_name = fp.split("/")[-1].split(".")[0]
                         spamwriter.writerow([str(idx), 24, fp,
                                              str(q_time), "", 0, 0])
                         print(idx, 24, fp, q_time, "", 0, flush=True)
@@ -639,6 +639,37 @@ def stress_analysis():
     print(np.mean(nr_overlapped))
 
 
+def intermediate_result(sql_path):
+    sql = open(sql_path).read()
+    sql = sql.replace(";", "")
+    postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
+    postgres.set_sql_query(sql)
+    new_sql = "SELECT COUNT(*)"
+    alias_set = {"ci", "rt", "mi", "it", "n", "chn", "t", "mc", "cn", "an"}
+    predicates = sql.split("WHERE")[-1].strip().split(" AND ")
+    join_predicates = get_join_predicates(sql)
+    unary_predicates = [p for p in predicates if p not in join_predicates]
+    table_clause = [postgres.alias_to_tables[a] + " AS " + a for a in alias_set]
+    new_sql += " FROM " + ", ".join(table_clause)
+    new_predicates = []
+    for unary_predicate in unary_predicates:
+        u_alias = unary_predicate.split(" ")[0].split(".")[0]
+        if u_alias in alias_set:
+            new_predicates.append(unary_predicate)
+    for join_predicate in join_predicates:
+        left_alias = join_predicate.split(" ")[0].split(".")[0]
+        right_alias = join_predicate.split(" ")[2].split(".")[0]
+        if left_alias in alias_set and right_alias in alias_set:
+            new_predicates.append(join_predicate)
+    new_sql += " WHERE " + " AND ".join(new_predicates)
+    cur = postgres.connection.cursor()
+    cur.execute(new_sql)
+    results = cur.fetchone()[0]
+    print(new_sql)
+    print(results)
+    postgres.close()
+
+
 if __name__ == "__main__":
     args = get_args()
     query_dir = args.query_dir
@@ -648,7 +679,8 @@ if __name__ == "__main__":
     nr_connections = 3
     topk = args.topk
     blocks = args.blocks
-    benchmark(args.method_name, args.nr_parallelism, args.use_psql)
+    # benchmark(args.method_name, args.nr_parallelism, args.use_psql)
+    intermediate_result(f"{query_dir}/19d.sql")
     # bench_optimal()
     # selectivity_analysis()
     # compare_cardinality("28c")
