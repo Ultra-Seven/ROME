@@ -7,6 +7,9 @@ import numpy as np
 import gurobipy as gp
 from gurobipy import GRB
 
+from db.postgres import Postgres
+from utils.pg_utils import get_im_result_count
+
 
 class Planner:
     def __init__(self, plan_trees, postgres, nr_threads=24,
@@ -235,7 +238,7 @@ class Planner:
             best_arm = None
         return optimal_arms
 
-    def probability_model(self, plan_trees, nr_threads=24):
+    def probability_model(self, plan_trees, nr_threads=24, mat_im=True):
         # Prune equivalent plans
         intermediate_groups = {}
         for arm_idx in plan_trees:
@@ -246,6 +249,24 @@ class Planner:
                 if f_key not in intermediate_groups:
                     intermediate_groups[f_key] = []
                 intermediate_groups[f_key].append(arm_idx)
+        if mat_im:
+            postgres = Postgres("localhost", 5432, "postgres",
+                                "postgres", self.postgres.database)
+            postgres.set_sql_query(self.postgres.sql, self.postgres.query_name)
+            for arm_idx in plan_trees:
+                plan = plan_trees[arm_idx].root
+                intermediate_selectivity = plan.f_nodes
+                with open(f"./figs/{self.postgres.query_name}/im_{arm_idx}.txt", "w") as f:
+                    for selectivity_node in intermediate_selectivity:
+                        f_key = selectivity_node.f_key
+                        left_key = f_key.split(":")[0].split("-")
+                        right_key = f_key.split(":")[1].split("-")
+                        joined_tables = sorted(list(set(left_key).union(set(right_key))))
+                        estimated_card = selectivity_node.d_mean
+                        true_card = get_im_result_count(postgres, self.postgres.sql, joined_tables)
+                        f.write(f"{','.join(joined_tables)}|{estimated_card}|{true_card}\n")
+                        print(f"{','.join(joined_tables)}|{estimated_card}|{true_card}")
+            postgres.close()
         plan_maps = {}
         for k in plan_trees:
             p_key = frozenset([i for i in intermediate_groups if k in intermediate_groups[i]])

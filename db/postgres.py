@@ -8,6 +8,7 @@ class Postgres:
         self.alias_to_rows = None
         self.stats_table = None
         self.sql = None
+        self.query_name = None
         self.alias_to_tables = None
         self.host = host
         self.port = port
@@ -41,8 +42,9 @@ class Postgres:
     def retrieve_stats(self):
         self.stats_table = get_stats_table(self.connection, list(self.table_sizes.keys()))
 
-    def set_sql_query(self, sql):
+    def set_sql_query(self, sql, query_name):
         self.sql = sql
+        self.query_name = query_name
         self.alias_to_rows = get_base_table_selectivity(self)
         if sql[-1] == ";":
             sql = sql[:-1]

@@ -53,6 +53,8 @@ def get_args():
                         help='method name')
     parser.add_argument('--nr_parallelism', type=int, default=3,
                         help='number of parallelism')
+    parser.add_argument('--nr_runs', type=int, default=1,
+                        help='number of experimental runs')
     parser.add_argument('--use_psql', type=int, default=0,
                         help='whether to use psql plan or not')
     return parser.parse_args()
@@ -325,8 +327,8 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
     postgres.close()
     for fp in os.listdir(query_dir):
-        # if fp.endswith(".sql"):
-        if fp.endswith(".sql") and fp in ["28a.sql"]:
+        if fp.endswith(".sql"):
+        # if fp.endswith(".sql") and fp in ["28a.sql"]:
             with open(os.path.join(query_dir, fp)) as f:
                 query = f.read()
                 queries.append((fp, query))
@@ -349,7 +351,7 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
                                              str(q_time), "", 0, 0])
                         print(idx, 24, fp, q_time, "", 0, flush=True)
                     else:
-                        postgres.set_sql_query(q)
+                        postgres.set_sql_query(q, query_name)
                         if use_psql:
                             arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
@@ -366,7 +368,8 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
                         # q_time = run_baseline_query(q, total_threads)
                         # query_name = fp.split("/")[-1].split(".")[0]
                         spamwriter.writerow([str(idx), str(arm_nr_threads), fp,
-                                             str(q_time), "-".join([str(x) for x in arms]), str(plan_time), str(nr_ims)])
+                                             str(q_time), "-".join([str(x) for x in arms]),
+                                             str(plan_time), str(nr_ims)])
                         print(idx, arm_nr_threads, fp, q_time, arms, nr_ims, flush=True)
                 except Exception as e:
                     print(e)
@@ -604,7 +607,7 @@ def stress_analysis():
     print("Read", len(queries), "queries.")
     overlapped_list = []
     for idx, (fp, q) in enumerate(queries):
-        postgres.set_sql_query(q)
+        postgres.set_sql_query(q, fp.split("/")[-1].split(".")[0])
         arm_im_results = {}
         covered_im_results = {}
         for arm_idx, flag_combination in enumerate(lst):
@@ -643,7 +646,7 @@ def intermediate_result(sql_path):
     sql = open(sql_path).read()
     sql = sql.replace(";", "")
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
-    postgres.set_sql_query(sql)
+    postgres.set_sql_query(sql, sql_path.split("/")[-1].split(".")[0])
     new_sql = "SELECT COUNT(*)"
     alias_set = {"ci", "rt", "mi", "it", "n", "chn", "t", "mc", "cn", "an"}
     predicates = sql.split("WHERE")[-1].strip().split(" AND ")
@@ -679,8 +682,8 @@ if __name__ == "__main__":
     nr_connections = 3
     topk = args.topk
     blocks = args.blocks
-    # benchmark(args.method_name, args.nr_parallelism, args.use_psql)
-    intermediate_result(f"{query_dir}/19d.sql")
+    benchmark(args.method_name, args.nr_parallelism, args.use_psql, args.nr_runs)
+    # intermediate_result(f"{query_dir}/19d.sql")
     # bench_optimal()
     # selectivity_analysis()
     # compare_cardinality("28c")

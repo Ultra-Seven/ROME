@@ -135,3 +135,30 @@ def get_base_table_selectivity(postgres):
         nr_rows = int(json.loads(result)[0]["Plan"]["Plan Rows"])
         alias_to_rows[a] = nr_rows
     return alias_to_rows
+
+
+def get_im_result_count(postgres, sql, alias_set):
+    sql = sql.replace(";", "")
+    new_sql = "SELECT COUNT(*)"
+    predicates = sql.split("WHERE")[-1].strip().split(" AND ")
+    join_predicates = get_join_predicates(sql)
+    unary_predicates = [p for p in predicates if p not in join_predicates]
+    table_clause = [postgres.alias_to_tables[a] + " AS " + a for a in alias_set]
+    new_sql += " FROM " + ", ".join(table_clause)
+    new_predicates = []
+    for unary_predicate in unary_predicates:
+        u_alias = unary_predicate.split(" ")[0].split(".")[0]
+        if u_alias in alias_set:
+            new_predicates.append(unary_predicate)
+    for join_predicate in join_predicates:
+        left_alias = join_predicate.split(" ")[0].split(".")[0]
+        right_alias = join_predicate.split(" ")[2].split(".")[0]
+        if left_alias in alias_set and right_alias in alias_set:
+            new_predicates.append(join_predicate)
+    new_sql += " WHERE " + " AND ".join(new_predicates)
+    cur = postgres.connection.cursor()
+    new_sql = "SET enable_nestloop TO off;\n" + new_sql
+    cur.execute(new_sql)
+    results = cur.fetchone()[0]
+    return results
+
