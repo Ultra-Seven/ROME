@@ -5,7 +5,7 @@ from visitors.visitor import Visitor
 
 class Node(ABC):
     def __init__(self, plan, postgres, children=None):
-        self.UNCERTAINTY = 0.5
+        self.UNCERTAINTY = postgres.uncertainty
         self.plan_rows = plan["Plan Rows"]
         self.total_cost = plan["Total Cost"]
         self.startup_cost = plan["Startup Cost"]
@@ -22,6 +22,7 @@ class Node(ABC):
 
         self.f_nodes = set()
         self.u_nodes = set()
+        self.buckets = {}
         self.d_mean = self.plan_rows
         self.d_std = 0
         self.card_product = 1
@@ -39,6 +40,8 @@ class Node(ABC):
             for u_node in child_node.u_nodes:
                 self.u_nodes.add(u_node)
         self.cost_per_card = self.cost / self.plan_rows
+        # Propagate the buckets
+        self.generate_buckets()
         # Linear cost
         self.c_mean = self.cost
         self.c_std = self.cost_per_card * self.d_std
@@ -55,6 +58,10 @@ class Node(ABC):
 
     def is_join_node(self):
         return False
+
+    def generate_buckets(self):
+        for child_node in self.children:
+            self.buckets.update(child_node.buckets)
 
     @abstractmethod
     def accept(self, visitor: Visitor) -> None:

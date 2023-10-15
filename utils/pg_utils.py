@@ -125,11 +125,12 @@ def get_base_table_selectivity(postgres):
         alias_to_unary[alias].append(unary_predicate)
 
     for a in alias_to_tables.keys():
-        where_clause = "" if len(alias_to_unary[a]) == 0 else " WHERE " + " AND ".join(alias_to_unary[a])
+        # where_clause = "" if len(alias_to_unary[a]) == 0 else " WHERE " + " AND ".join(alias_to_unary[a])
         # target_sql = "SELECT * FROM " + alias_to_tables[a] + " AS " + a + where_clause
         target_sql = "SELECT * FROM " + alias_to_tables[a] + " AS " + a
         target_sql = "EXPLAIN (COSTS, VERBOSE, FORMAT JSON) " + target_sql
-        result = subprocess.run(['psql', '-h', 'localhost', '-U', 'postgres', '-d', database, '-XqAt', '-c', target_sql],
+        result = subprocess.run(['psql', '-h', 'localhost', '-U', 'postgres', '-d',
+                                 database, '-XqAt', '-c', f'{target_sql}'],
                                 stdout=subprocess.PIPE)
         result = result.stdout.decode('utf-8')
         nr_rows = int(json.loads(result)[0]["Plan"]["Plan Rows"])

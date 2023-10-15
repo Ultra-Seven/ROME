@@ -6,7 +6,17 @@ from visitors.visitor import Visitor
 
 
 def is_join_predicate(predicate, left_tables, right_tables):
-    alias = [term.strip().split(".")[0] for term in predicate.split("=")]
+    if ">=" in predicate:
+        join_predicates = predicate.split(">=")
+    elif "<=" in predicate:
+        join_predicates = predicate.split("<=")
+    elif ">" in predicate:
+        join_predicates = predicate.split(">")
+    elif "<" in predicate:
+        join_predicates = predicate.split("<")
+    elif "=" in predicate:
+        join_predicates = predicate.split("=")
+    alias = [term.strip().split(".")[0] for term in join_predicates]
     if (alias[0] in left_tables and alias[1] in right_tables) or (alias[1] in left_tables and alias[0] in right_tables):
         return True
     else:

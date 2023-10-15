@@ -4,7 +4,7 @@ import os
 import signal
 import sys
 from itertools import combinations
-from time import time
+from time import time, sleep
 import subprocess
 from scipy.stats import chi2_contingency
 import csv
@@ -26,14 +26,15 @@ output_file = sys.argv[3]
 PG_CONNECTION_STR = f"dbname={database} user=postgres host=localhost"
 nr_connections = 3
 topk = sys.argv[4] if len(sys.argv) > 4 else 5
-blocks = sys.argv[5] if len(sys.argv) > 5 else 10
+blocks = sys.argv[5] if len(sys.argv) > 5 else 5
+uncertainty = 0.5
+penalty = 0.01
 
 _ALL_OPTIONS = [
     "enable_nestloop", "enable_hashjoin", "enable_mergejoin",
     "enable_seqscan", "enable_indexscan", "enable_indexonlyscan"
 ]
 flag_combinations_list = list(itertools.product([0, 1], repeat=len(_ALL_OPTIONS)))
-
 
 def get_args():
     parser = argparse.ArgumentParser(
@@ -49,13 +50,21 @@ def get_args():
                         help='top k plans to consider')
     parser.add_argument('--blocks', type=int, default=10,
                         help='number of blocks to consider')
+    parser.add_argument('--uncertainty', type=float, default=0.5,
+                        help='uncertainty to consider')
+    parser.add_argument('--penalty', type=float, default=0.1,
+                        help='penalty to consider')
     parser.add_argument('--method_name', type=str, default="pararqo",
                         help='method name')
     parser.add_argument('--nr_parallelism', type=int, default=3,
                         help='number of parallelism')
-    parser.add_argument('--nr_runs', type=int, default=1,
+    parser.add_argument('--nr_runs', type=int, default=3,
                         help='number of experimental runs')
     parser.add_argument('--use_psql', type=int, default=0,
+                        help='whether to use psql plan or not')
+    parser.add_argument('--solver', type=str, default="greedy",
+                        help='whether to use psql plan or not')
+    parser.add_argument('--is_full', type=int, default=0,
                         help='whether to use psql plan or not')
     return parser.parse_args()
 
@@ -112,7 +121,8 @@ def parse_postgres_plan(plan):
 
 
 def find_arms(sql, postgres, full=False,
-              method_name="max_results", nr_parallelism=3, query_name="default"):
+              method_name="max_results", nr_parallelism=3,
+              query_name="default", solver="greedy"):
     plan_trees = {}
     if full:
         nr_arms = 2 ** len(_ALL_OPTIONS)
@@ -133,8 +143,11 @@ def find_arms(sql, postgres, full=False,
                                  '-U', 'postgres', '-d', database, '-XqAt', '-c', target_sql],
                                 stdout=subprocess.PIPE)
         plan_trees[x] = PlanTree(sql, result, postgres,
-                                 visualization=True, pid=x, query_name=query_name)
-    planner = Planner(plan_trees, postgres, 24, topk, blocks, method_name, nr_parallelism)
+                                 visualization=False, pid=x,
+                                 query_name=query_name)
+    planner = Planner(plan_trees, postgres, 24,
+                      topk, blocks, method_name, nr_parallelism,
+                      solver=solver, penalty=penalty)
     plan_start = time()
     optimal_arms = planner.optimal_arms(plan_trees)
     plan_end = time()
@@ -256,10 +269,14 @@ def run_query(sql, nr_threads, arms, full=False, use_psql=0):
             print(f"Registering process {worker.pid}")
             procs_list.append(psutil.Process(worker.pid))
         if use_psql == 1:
+
             execute_sql = f"\nSET statement_timeout = 60000;\n"
             # execute_sql = f"SET max_parallel_workers = {nr_threads};\n" \
             #               f"SET max_parallel_workers_per_gather = {nr_threads};" \
             #               f"\nSET statement_timeout = 60000;\n"
+            if len(arms) == 0:
+                execute_sql += f"SET max_parallel_workers = {nr_threads};\n" \
+                              f"SET max_parallel_workers_per_gather = {nr_threads};\n"
             execute_sql += sql
             worker = subprocess.Popen(['psql', '-h', 'localhost', '-U', 'postgres', '-d',
                                        database, '-c', execute_sql], stdout=subprocess.PIPE)
@@ -273,15 +290,50 @@ def run_query(sql, nr_threads, arms, full=False, use_psql=0):
                     print(f"Killing process {proc.pid}")
                     os.kill(proc.pid, signal.SIGKILL)
         while True:
-            gone, alive = psutil.wait_procs(procs_list, timeout=60, callback=on_terminate)
+            gone, alive = psutil.wait_procs(procs_list, timeout=70, callback=on_terminate)
             if len(gone) > 0:
+                stop = time()
                 for alive_proc in alive:
                     print(alive_proc.pid)
                     os.kill(alive_proc.pid, signal.SIGKILL)
                 break
+
+        # print("Restarting: ", result.stdout.decode('utf-8'))
+        remaining_procs = []
+        for proces in psutil.process_iter():
+            try:
+                process_args_list = proces.cmdline()
+                if any(["parallel worker" in x for x in process_args_list]):
+                    remaining_procs.append(psutil.Process(proces.pid))
+            except Exception as e:
+                continue
+        while True:
+            gone, alive = psutil.wait_procs(remaining_procs, timeout=60, callback=on_terminate)
+            for alive_proc in alive:
+                os.kill(alive_proc.pid, signal.SIGKILL)
+            if len(alive) == 0:
+                break
+        result = subprocess.Popen(['pg_ctl', '-D', '/export/pgdata/', 'restart'],
+                                  stdout=subprocess.PIPE)
+        remaining_procs = []
+        for proces in psutil.process_iter():
+            try:
+                process_args_list = proces.cmdline()
+                if any(["pg_ctl" in x for x in process_args_list]):
+                    remaining_procs.append(psutil.Process(proces.pid))
+            except Exception as e:
+                continue
+        while True:
+            gone, alive = psutil.wait_procs(remaining_procs, timeout=60, callback=on_terminate)
+            for alive_proc in alive:
+                os.kill(alive_proc.pid, signal.SIGKILL)
+            if len(alive) == 0:
+                break
+        print("Restarting done!")
     except Exception as e:
         print(e)
-    stop = time()
+        stop = time()
+
     return stop - start
 
 
@@ -321,21 +373,28 @@ def run_baseline_query(sql, nr_threads):
     return stop - start
 
 
-def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
+def benchmark(method_name, nr_parallelism, use_psql=False,
+              nr_runs=3, solver="greedy", is_full=False):
     queries = []
     BASELINE = False
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
     postgres.close()
+    postgres.uncertainty = uncertainty
+    postgres.nr_blocks = blocks
+
     for fp in os.listdir(query_dir):
         if fp.endswith(".sql"):
-        # if fp.endswith(".sql") and fp in ["28a.sql"]:
+        # if fp.endswith(".sql") and fp in ["q12-002.sql"]:
             with open(os.path.join(query_dir, fp)) as f:
                 query = f.read()
                 queries.append((fp, query))
+    if database == "so":
+        unsupported_queries = ["q10-", "q13-", "q14-", "q15-", "q16-"]
+        queries = [q for q in queries if not any([q[0].startswith(u) for u in unsupported_queries])]
     queries = sorted(queries, key=lambda x: x[0])
     print("Read", len(queries), "queries.")
     total_threads = 24
-    is_full = False
+    is_full = is_full
     for x in range(nr_runs):
         with open(f"results/{output_file}_{x}.csv", 'w', newline='') as csvfile:
             spamwriter = csv.writer(csvfile, delimiter=',',
@@ -343,8 +402,10 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
             spamwriter.writerow(["Idx", "Threads", "Query", "Time", "Arms", "PlanTime", "Nr_IMs"])
             for idx, (fp, q) in enumerate(queries):
                 query_name = fp.split("/")[-1].split(".")[0]
-                # if True:
-                try:
+                if True:
+                # try:
+                    # run_query(q, total_threads, [4])
+                    # run_query(q, total_threads, [5])
                     if BASELINE:
                         q_time = run_baseline_query(q, total_threads)
                         spamwriter.writerow([str(idx), 24, fp,
@@ -356,14 +417,17 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
                             arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
                                                                 nr_parallelism=nr_parallelism-1,
-                                                                query_name=query_name)
+                                                                query_name=query_name,
+                                                                solver=solver)
                         else:
                             arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
                                                                 nr_parallelism=nr_parallelism,
-                                                                query_name=query_name)
+                                                                query_name=query_name,
+                                                                solver=solver)
                         arm_nr_threads = (total_threads // len(arms))
                         print(fp, arms)
+                        # q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
                         q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
                         # q_time = run_baseline_query(q, total_threads)
                         # query_name = fp.split("/")[-1].split(".")[0]
@@ -371,9 +435,9 @@ def benchmark(method_name, nr_parallelism, use_psql=False, nr_runs=3):
                                              str(q_time), "-".join([str(x) for x in arms]),
                                              str(plan_time), str(nr_ims)])
                         print(idx, arm_nr_threads, fp, q_time, arms, nr_ims, flush=True)
-                except Exception as e:
-                    print(e)
-                    print(f"Unsupported query {fp}")
+                # except Exception as e:
+                #     print(e)
+                #     print(f"Unsupported query {fp}")
 
 
 def selectivity_analysis():
@@ -648,7 +712,7 @@ def intermediate_result(sql_path):
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
     postgres.set_sql_query(sql, sql_path.split("/")[-1].split(".")[0])
     new_sql = "SELECT COUNT(*)"
-    alias_set = {"ci", "rt", "mi", "it", "n", "chn", "t", "mc", "cn", "an"}
+    alias_set = {"mc",  "cn", "miidx", "it", "ct", "mi", "it2", "t", "kt"}
     predicates = sql.split("WHERE")[-1].strip().split(" AND ")
     join_predicates = get_join_predicates(sql)
     unary_predicates = [p for p in predicates if p not in join_predicates]
@@ -682,8 +746,11 @@ if __name__ == "__main__":
     nr_connections = 3
     topk = args.topk
     blocks = args.blocks
-    benchmark(args.method_name, args.nr_parallelism, args.use_psql, args.nr_runs)
-    # intermediate_result(f"{query_dir}/19d.sql")
+    uncertainty = args.uncertainty
+    penalty = args.penalty
+    benchmark(args.method_name, args.nr_parallelism, args.use_psql,
+              args.nr_runs, args.solver, args.is_full)
+    # intermediate_result(f"{query_dir}/13a.sql")
     # bench_optimal()
     # selectivity_analysis()
     # compare_cardinality("28c")

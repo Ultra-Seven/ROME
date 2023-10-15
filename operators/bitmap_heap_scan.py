@@ -14,6 +14,11 @@ class BitmapHeapScan(Node):
             self.card_product = postgres.table_records[plan["Relation Name"]]
             self.filter_product = 0 if self.card_product == 0 else self.plan_rows / self.card_product
             self.f_mean = 0 if self.card_product == 0 else self.plan_rows / self.card_product
+            # if "Filter" in plan and "%" in plan["Filter"]:
+            #     self.buckets = {self.plan_rows: 1 - self.UNCERTAINTY, 10 * self.plan_rows: self.UNCERTAINTY}
+            # else:
+            #     self.buckets = {self.plan_rows: 1}
+            self.buckets = {self.plan_rows: 1}
 
     def __str__(self):
         return f"[{self.node_type}]:\n{self.relation_name}"

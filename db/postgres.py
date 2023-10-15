@@ -21,6 +21,8 @@ class Postgres:
         self.table_sizes = {}
         self.table_records = {}
         self.initialize_parameters()
+        self.uncertainty = 0.5
+        self.nr_blocks = 5
         table_names = get_all_tables(self.connection)
         for table_name in table_names:
             self.table_sizes[table_name] = get_table_size(self.connection, table_name)
@@ -50,6 +52,7 @@ class Postgres:
             sql = sql[:-1]
         sql = sql.replace("and", "AND")
         sql = sql.replace("And", "AND")
+        sql = sql.replace(" as ", " AS ")
         sql = sql.replace("between", "BETWEEN")
         sql = sql.replace("Between", "BETWEEN")
         sql = sql.replace("\n", " ")

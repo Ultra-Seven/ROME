@@ -1,3 +1,6 @@
+import os
+import sys
+
 import numpy as np
 import pandas as pd
 import scipy.stats as st
@@ -41,26 +44,73 @@ def performance_evaluation():
                "greedy_cardmodel_k3b20",
                "greedy_cardmodel_k3b30",
                "greedy_cardmodel_k3b50",
-               "greedy_cardmodel_k1b10p0.5",
-               "greedy_cardmodel_k3b10p0.5",
-               "greedy_cardmodel_k5b10p0.5",
-               "greedy_cardmodel_k7b10p0.5",
-               "greedy_cardmodel_k3b5p0.5",
-               "greedy_cardmodel_k3b50p0.5",
-               "greedy_cardmodel_k3b100p0.5",
+               # "greedy_cardmodel_k1b10p0.5",
+               # "greedy_cardmodel_k3b10p0.5",
+               # "greedy_cardmodel_k5b10p0.5",
+               # "greedy_cardmodel_k7b10p0.5",
+               # "greedy_cardmodel_k3b5p0.5",
+               # "greedy_cardmodel_k3b50p0.5",
+               # "greedy_cardmodel_k3b100p0.5",
+               #
+               # "greedy_cardsq_k5b10e0.5",
+               # "greedy_cardsq_k5b10e1",
+               # "greedy_cardsq_k5b10e10",
+               #
+               # "greedy_imresults",
+               # "greedy_imresults_ilp",
+               # "greedy_imresults_ilp_para3",
+               # "greedy_imresults_ilp_para8"，
+               "greedy_combine_k1b10",
+               "greedy_combine_k3b10",
+               "greedy_combine_k5b10",
+               "greedy_combine_k7b10",
+               "greedy_combine_k3b5",
+               "greedy_combine_k3b20",
+               "greedy_combine_k3b30",
+               "greedy_combine_k3b50",
 
-               "greedy_cardsq_k5b10e0.5",
-               "greedy_cardsq_k5b10e1",
-               "greedy_cardsq_k5b10e10",
+               "greedy_combine_k3b10u001",
+               "greedy_combine_k3b10u01",
+               "greedy_combine_k3b10u05",
+               "greedy_combine_k3b10u1",
+               "greedy_combine_k3b10u10",
+               "greedy_combine_k3b10p001",
+               "greedy_combine_k3b10p01",
+               "greedy_combine_k3b10p1",
+               "greedy_combine_k3b10p5",
+               "greedy_combine_k3b10p10",
 
-               "greedy_imresults",
-               "greedy_imresults_ilp",
-               "greedy_imresults_ilp_para3",
-               "greedy_imresults_ilp_para8"
+               "greedy_so_combine_k5b10",
+               "greedy_so_combine_mpd",
+
+               "greedy_predicate_k1b10",
+
+               # Vary parameters
+               # "greedy_poirange_k1b10",
+               # "greedy_poirange_k3b10",
+               # "greedy_poirange_k5b10",
+               # "greedy_poirange_k7b10",
+               # "greedy_poirange_k3b5",
+               # "greedy_poirange_k3b20",
+               # "greedy_poirange_k3b30",
+               # "greedy_poirange_k3b50",
+               # "greedy_imdb_poirange_mpd",
+
+               "greedy_poirange_para1_mpd",
+               "greedy_poirange_para2_mpd",
+               "greedy_poirange_para4_mpd",
+               "greedy_poirange_para5_mpd",
+               "greedy_poirange_para6_mpd",
+               "greedy_poirange_para1_pm",
+               "greedy_poirange_para2_pm",
+               "greedy_poirange_para4_pm",
+               "greedy_poirange_para5_pm",
+               "greedy_poirange_para6_pm",
                ]
     data = {}
     for method in methods:
-        data[method] = [pd.read_csv("results/performance/" + method + "_" + str(run) + ".csv")
+        data[method] = [pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance/"
+                                    + method + "_" + str(run) + ".csv")
                         for run in range(nr_runs)]
     optimal = [{"Time": np.min(np.array([data["fix_plan_" + str(0)][run]["Time"],
                                          data["fix_plan_" + str(1)][run]["Time"],
@@ -78,41 +128,59 @@ def performance_evaluation():
         sum_performance = np.sum(performance, axis=1)
         h = mean_confidence_interval(sum_performance)
         method_name = "_".join(method.split("_")[1:])
-        print(f"{method_name}\t{avg_value}\t{h}")
+        print(f"{method_name},{avg_value},{h}")
 
-    # with open("results/query_performance.csv", "w") as f:
-    #     f.write("Query,Method,Performance,Interval\n")
-    #     for method in data:
-    #         if method in ["fix_plan_0", "fix_plan_1", "fix_plan_2", "fix_plan_3", "fix_plan_4",
-    #                       "fix_plan_5", "imdb_optimal", "greedy_cardmodel_k7b10p0.5"]:
-    #             performance = np.array([data[method][x]["Time"] for x in range(nr_runs)])
-    #             interval = np.array([mean_confidence_interval(y) for y in performance.T])
-    #             queries = list(data["fix_plan_0"][0]["Query"])
-    #             avg_performance = np.mean(performance, axis=0)
-    #
-    #             method_name = "_".join(method.split("_")[1:])
-    #             for idx, p in enumerate(avg_performance):
-    #                 query_name = queries[idx].split(".")[0]
-    #                 f.write(f"{query_name},{method_name},{p},{interval[idx]}\n")
-    #
-    #             query_names = ",".join([q.split(".")[0] for m, q in enumerate(queries) if m % 10 == 0])
-    #
-    #             print(query_names)
+    with open("/Users/tracy/Documents/Research/bak_ParaRQO/results/query_performance.csv", "w") as f:
+        f.write("Query,Method,Performance,Interval\n")
+        for method in data:
+            if method in ["fix_plan_0", "fix_plan_1", "fix_plan_2", "fix_plan_3", "fix_plan_4",
+                          "fix_plan_5", "imdb_optimal", "greedy_poirange_k3b10"]:
+                performance = np.array([data[method][x]["Time"] for x in range(nr_runs)])
+                interval = np.array([mean_confidence_interval(y) for y in performance.T])
+                queries = list(data["fix_plan_0"][0]["Query"])
+                avg_performance = np.mean(performance, axis=0)
+
+                method_name = "_".join(method.split("_")[1:])
+                for idx, p in enumerate(avg_performance):
+                    query_name = queries[idx].split(".")[0]
+                    f.write(f"{query_name},{method_name},{p},{interval[idx]}\n")
+
+                # query_names = ",".join([q.split(".")[0] for m, q in enumerate(queries) if m % 10 == 0])
+                #
+                # print(query_names)
 
 
 def time_vs_quality():
     # methods = ["greedy_imresults", "greedy_imresults_ilp_para3", "greedy_imresults_ilp_para8"]
-    methods = ["greedy_full_ilppara3", "greedy_full_ilppara8",
-               "greedy_full_imresultspara3", "greedy_full_imresultspara8",
-               "greedy_psql_ilppara2", "greedy_psql_ilppara4", "greedy_psql_ilppara6", "greedy_psql_ilppara8",
-               "greedy_psql_imresultspara2", "greedy_psql_imresultspara4", "greedy_psql_imresultspara6", "greedy_psql_imresultspara8",]
+    # methods = ["greedy_full_ilppara3", "greedy_full_ilppara8",
+    #            "greedy_full_imresultspara3", "greedy_full_imresultspara8",
+    #            "greedy_psql_ilppara2", "greedy_psql_ilppara4", "greedy_psql_ilppara6", "greedy_psql_ilppara8",
+    #            "greedy_psql_imresultspara2", "greedy_psql_imresultspara4", "greedy_psql_imresultspara6",
+    #            "greedy_psql_imresultspara8"]
+    model_name = "pm"
+    if model_name == "pm":
+        methods = ["greedy_pm_ilppara2", "greedy_pm_ilppara4",
+                   "greedy_pm_ilppara6", "greedy_pm_ilppara8",
+                   "greedy_poirange_greedypara2", "greedy_poirange_greedypara4",
+                   "greedy_poirange_greedypara6", "greedy_poirange_greedypara8"
+                   ]
+    else:
+        methods = ["greedy_psql_ilppara2", "greedy_psql_ilppara4",
+                   "greedy_psql_ilppara6", "greedy_psql_ilppara8",
+                   "greedy_psql_imresultspara2", "greedy_psql_imresultspara4",
+                   "greedy_psql_imresultspara6", "greedy_psql_imresultspara8"
+                   ]
     data = {}
     nr_runs = 3
     for method in methods:
-        data[method] = [pd.read_csv("results/performance/" + method + "_" + str(run) + ".csv")
+        data[method] = [pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance/"
+                                    + method + "_" + str(run) + ".csv")
                         for run in range(nr_runs)]
     print(f"Method\tPerformance\tInterval\tIMs Quality\tPlan Time\tNr Plans")
+    perf_dict = {"Greedy": {}, "ILP": {}}
     for method in data:
+        sys_name = "ILP" if "ilp" in method else "Greedy"
+        parallelism = int(method.split("para")[-1])
         performance = np.array([data[method][x]["Time"] for x in range(nr_runs)])
         avg_performance = np.mean(performance, axis=0)
         avg_value = np.sum(avg_performance)
@@ -127,9 +195,239 @@ def time_vs_quality():
         avg_quality = np.mean(np.mean(quality, axis=0))
         avg_plan_time = np.mean(plan_time, axis=0)
         all_plan_time = np.sum(avg_plan_time)
+        if parallelism not in perf_dict[sys_name]:
+            perf_dict[sys_name][parallelism] = {}
+        perf_dict[sys_name][parallelism]["Performance"] = avg_value
+        perf_dict[sys_name][parallelism]["Quality"] = avg_quality
+        perf_dict[sys_name][parallelism]["Planning"] = all_plan_time
+        perf_dict[sys_name][parallelism]["Interval"] = h
         print(f"{method_name}\t{avg_value}\t{h}\t{avg_quality}\t{all_plan_time}\t{avg_nr_plans}")
+    for x in [2, 4, 6, 8]:
+        base = perf_dict["ILP"][x]["Quality"]
+        for sys_name in ["ILP", "Greedy"]:
+            perf_dict[sys_name][x]["Quality"] = abs(float(perf_dict[sys_name][x]["Quality"] - base))
+
+    with open(f"/Users/tracy/Documents/Research/bak_ParaRQO/results/performance/quality_{model_name}.csv", "w") as f:
+        f.write("Method,Parallelism,Performance,Quality,Planning,Interval\n")
+        for sys_name in ["ILP", "Greedy"]:
+            for x in [2, 4, 6, 8]:
+                f.write(f"{sys_name},{x},{perf_dict[sys_name][x]['Performance']},"
+                        f"{perf_dict[sys_name][x]['Quality']},"
+                        f"{perf_dict[sys_name][x]['Planning']},"
+                        f"{perf_dict[sys_name][x]['Interval']}\n")
+
+def im_analysis_per_query():
+    directory = "figs/"
+    queries = []
+    for filename in os.listdir(directory):
+        f = os.path.join(directory, filename)
+        # checking if it is a directory
+        if os.path.isdir(f):
+            queries.append(filename)
+    queries = sorted(queries)
+    im_optimal = pd.read_csv("results/im_optimal_0.csv")
+    para_rqo = pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                           "/greedy_cardmodel_k5b10_1.csv")
+    fix_time_dict = {
+        "0": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_0_1.csv"),
+        "1": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_1_1.csv"),
+        "2": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_2_1.csv"),
+        "3": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_3_1.csv"),
+        "4": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_4_1.csv"),
+        "5": pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance"
+                        "/fix_plan_5_1.csv")
+    }
+    with open("results/im_analysis.csv", "w") as f:
+        f.write("Query,Sys,EC,TC\n")
+        # Default method is plan = 0
+        for query in queries:
+            try:
+                # Default method is plan = 0
+                default_path = os.path.join(directory, query, "im_0.txt")
+                default_arm = pd.read_csv(default_path, sep="|", header=None)
+                default_arm.columns = ["IM", "EC", "TC"]
+                default_tcs = sum(list(default_arm["TC"]))
+                default_ecs = sum(list(default_arm["EC"]))
+                # IM optimal
+                im_idx = im_optimal[im_optimal["Query"] == query+".sql"]["Arms"].values[0]
+                im_optimal_path = os.path.join(directory, query, f"im_{im_idx}.txt")
+                im_optimal_arm = pd.read_csv(im_optimal_path, sep="|", header=None)
+                im_optimal_arm.columns = ["IM", "EC", "TC"]
+                im_optimal_tcs = sum(list(im_optimal_arm["TC"]))
+                im_optimal_ecs = sum(list(im_optimal_arm["EC"]))
+                # ParaRQO
+                para_idx_list = para_rqo[para_rqo["Query"] == query+".sql"]["Arms"].values[0].split("-")
+                best_arm_idx = -1
+                best_time = sys.maxsize
+                for para_idx in para_idx_list:
+                    fix_time = fix_time_dict[para_idx][fix_time_dict[para_idx]["Query"] == query+".sql"]["Time"].values[0]
+                    if fix_time < best_time:
+                        best_time = fix_time
+                        best_arm_idx = para_idx
+                best_path = os.path.join(directory, query, f"im_{best_arm_idx}.txt")
+                best_arm = pd.read_csv(best_path, sep="|", header=None)
+                best_arm.columns = ["IM", "EC", "TC"]
+                best_tcs = sum(list(best_arm["TC"]))
+                best_ecs = sum(list(best_arm["EC"]))
+                f.write(f"{query},Postgres,1,1\n")
+                f.write(f"{query},OIM,{im_optimal_ecs/default_ecs},{im_optimal_tcs/default_tcs}\n")
+                f.write(f"{query},ParaRQO,{best_ecs/default_ecs},{best_tcs/default_tcs}\n")
+            except Exception as e:
+                print(query)
+
+
+def analyze_per_query_performance():
+    data_df = pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/query_performance.csv")
+    queries = sorted(list(set(data_df["Query"])))
+    pm_df = data_df[data_df["Method"].str.contains("poirange_k3b10")]
+    optimal_df = data_df[data_df["Method"].str.contains("optimal")]
+    bao_df = data_df[data_df["Method"].str.contains("BAO1")]
+    pm_performance = pm_df["Performance"].values
+    optimal_performance = optimal_df["Performance"].values
+    bao_performance = bao_df["Performance"].values
+
+    optimal_ratio = pm_performance / optimal_performance
+    bao_ratio = pm_performance / bao_performance
+    optimal_regression = 0
+    optimal_improvement = 0
+    optimal_same = 0
+    bao_regression = 0
+    bao_improvement = 0
+    bao_same = 0
+    bound = 0.2
+    with open("/Users/tracy/Documents/Research/bak_ParaRQO/results/query_performance_ratio.csv", "w") as f:
+        f.write("Query,Method,Ratio\n")
+        for idx, query in enumerate(queries):
+            f.write(f"{query},Optimal,{optimal_ratio[idx]}\n")
+            if optimal_ratio[idx] > 1 + bound:
+                optimal_regression += 1
+            elif optimal_ratio[idx] < 1 - bound:
+                optimal_improvement += 1
+            else:
+                optimal_same += 1
+        for idx, query in enumerate(queries):
+            f.write(f"{query},BAO,{bao_ratio[idx]}\n")
+            if bao_ratio[idx] > 1 + bound:
+                bao_regression += 1
+            elif bao_ratio[idx] < 1 - bound:
+                bao_improvement += 1
+            else:
+                bao_same += 1
+
+    bin_edges = np.array([0, 0.5, 1.0, 1.5, 2.0, 2.5, 3, 3.5])
+    hist, bin_edges = np.histogram(optimal_ratio, bins=bin_edges)
+    total = sum(hist)
+    hist = [h / total for h in hist]
+    hist.append(0)
+    print(list(zip(bin_edges, hist)))
+    bin_edges = np.array([0, 0.2, 0.4, 0.6, 0.8, 1.0, 1.2, 1.4, 1.6, 1.8, 2.0])
+    hist, bin_edges = np.histogram(bao_ratio, bins=bin_edges)
+    hist = [h / total for h in hist]
+    hist.append(0)
+    print(list(zip(bin_edges, hist)))
+
+    print(f"Optimal stats: {optimal_improvement}, {optimal_regression}, {optimal_same}")
+    print(f"BAO stats: {bao_improvement}, {bao_regression}, {bao_same}")
+
+
+def analyze_per_query_result():
+    data_df = pd.read_csv("results/im_analysis.csv")
+    queries = sorted(list(set(data_df["Query"])))
+    pm_df = data_df[data_df["Sys"].str.contains("ParaRQO")]
+    oim_df = data_df[data_df["Sys"].str.contains("OIM")]
+    default_df = data_df[data_df["Sys"].str.contains("Postgres")]
+    pm_performance = pm_df["TC"].values
+    oim_performance = oim_df["TC"].values
+    default_performance = default_df["TC"].values
+
+    oim_ratio = pm_performance / oim_performance
+    default_ratio = pm_performance / default_performance
+    oim_regression = 0
+    oim_improvement = 0
+    oim_same = 0
+    default_regression = 0
+    default_improvement = 0
+    default_same = 0
+    bound = 0.2
+    for idx, query in enumerate(queries):
+        if oim_ratio[idx] > 1 + bound:
+            oim_regression += 1
+        elif oim_ratio[idx] < 1 - bound:
+            oim_improvement += 1
+        else:
+            oim_same += 1
+    for idx, query in enumerate(queries):
+        if default_ratio[idx] > 1 + bound:
+            default_regression += 1
+        elif default_ratio[idx] < 1 - bound:
+            default_improvement += 1
+        else:
+            default_same += 1
+
+    bin_edges = np.array([0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6])
+    hist, bin_edges = np.histogram(oim_ratio, bins=bin_edges)
+    hist = [h / sum(hist) for h in hist]
+
+    print(zip(hist, bin_edges))
+    bin_edges = np.array([0, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5, 5.5, 6, 6.5, 7, 7.5, 8, 8.5])
+    hist, bin_edges = np.histogram(default_ratio, bins=bin_edges)
+    hist = [h / sum(hist) for h in hist]
+    hist.append(0)
+    print(zip(hist, bin_edges))
+
+    print(f"OIM stats: {oim_improvement}, {oim_regression}, {oim_same}")
+    print(f"Default stats: {default_improvement}, {default_regression}, {default_same}")
+
+
+def evaluate_so_performance():
+    nr_runs = 3
+    methods = [
+        "so_cardmodel_k5b10",
+        "so_max_results",
+        "so_postgres",
+        "greedy_stack_poirange",
+        "greedy_stack_poirange_mpd",
+        "so_optimal",
+    ]
+    data = {}
+    query_list = ["q1-", "q2-", "q3-", "q4-", "q5-", "q6-", "q7-", "q7-", "q9-", "q11-", "q12-"]
+
+    def check_valid(s):
+        for q in query_list:
+            if s.startswith(q):
+                return True
+        return False
+    for method in methods:
+        data[method] = [pd.read_csv("/Users/tracy/Documents/Research/bak_ParaRQO/results/performance/"
+                                    + method + "_" + str(run) + ".csv")
+                        for run in range(nr_runs)]
+        for idx, df in enumerate(data[method]):
+            df['Valid'] = list(
+                map(lambda x: check_valid(x), df['Query']))
+            df = df[df['Valid']]
+            data[method][idx] = df
+
+    print(f"Method\t\t\t\tPerformance")
+    for method in data:
+        performance = np.array([data[method][x]["Time"] for x in range(nr_runs)])
+        avg_performance = np.mean(performance, axis=0)
+        avg_value = np.sum(avg_performance)
+        sum_performance = np.sum(performance, axis=1)
+        h = mean_confidence_interval(sum_performance)
+        method_name = "_".join(method.split("_")[1:])
+        nr_timeouts = np.mean([len([x for x in p if x >= 59]) for p in performance])
+        print(f"{method_name},{avg_value},{h}, {nr_timeouts}")
 
 
 if __name__ == '__main__':
-    # performance_evaluation()
-    time_vs_quality()
+    performance_evaluation()
+    # evaluate_so_performance()
+    # time_vs_quality()
+    # im_analysis_per_query()
+    # analyze_per_query_performance()
+    # analyze_per_query_result()

@@ -13,6 +13,9 @@ def extract_tables(sql):
         if " AS " in item:
             table, alias = item.split(" AS ")
             table_to_alias[alias.strip()] = table.strip()
+        elif " as " in item:
+            table, alias = item.split(" as ")
+            table_to_alias[alias.strip()] = table.strip()
         elif len(item_list) > 1:
             table, alias = item_list
             table_to_alias[alias.strip()] = table.strip()

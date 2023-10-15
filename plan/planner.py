@@ -14,17 +14,18 @@ from utils.pg_utils import get_im_result_count
 class Planner:
     def __init__(self, plan_trees, postgres, nr_threads=24,
                  topk=3, nr_blocks=10,
-                 method="max_results", max_para=3):
+                 method="max_results", max_para=3, solver="greedy", penalty=0.1):
         self.nr_selected_ims = -1
         self.plan_trees = plan_trees
         self.postgres = postgres
         self.nr_threads = nr_threads
         self.policy = method
-        self.optimized_policy = "monte_carlo"
+        self.optimized_policy = solver
         self.verbose = False
         self.topk = int(topk)
         self.max_para = max_para
         self.nr_blocks = int(nr_blocks)
+        self.penalty = penalty
 
     def optimal_arms(self, plan_trees):
         # return self.greedy_max_accurate_plan(plan_trees)
@@ -37,11 +38,11 @@ class Planner:
         elif self.policy == "fix plan":
             return [5]
         elif self.policy == "probability_model":
-            return self.probability_model(plan_trees)
+            return self.probability_model(plan_trees, mat_im=False)
         elif self.policy == "predicate":
             return self.predicate_model(plan_trees)
         else:
-            return self.probability_model(plan_trees)
+            return self.probability_model(plan_trees, mat_im=False)
 
     def maximize_unique_results(self, max_parallelism=-1):
         optimal_arms = []
@@ -55,7 +56,7 @@ class Planner:
             uncovered |= plan_intermediate_results[arm_idx]
 
         # Iterate until all elements are covered
-        while len(uncovered) > 0 and (max_parallelism == -1 or len(optimal_arms) < max_parallelism):
+        while max_parallelism == -1 or len(optimal_arms) < max_parallelism:
             # Choose the set that covers the most uncovered elements
             remaining_arms = [arm_idx for arm_idx in self.plan_trees if arm_idx not in optimal_arms]
             best_arm = max(remaining_arms, key=lambda a: len(plan_intermediate_results[a].intersection(uncovered)))
@@ -238,7 +239,7 @@ class Planner:
             best_arm = None
         return optimal_arms
 
-    def probability_model(self, plan_trees, nr_threads=24, mat_im=True):
+    def probability_model(self, plan_trees, nr_threads=24, mat_im=False):
         # Prune equivalent plans
         intermediate_groups = {}
         for arm_idx in plan_trees:
@@ -281,11 +282,14 @@ class Planner:
         print("Remaining plans: ", set(range(0, 6)).difference(removed_plans))
         if self.optimized_policy == "monte carlo":
             optimal_arms = self.monte_carlo_method(removed_plans)
+        elif self.optimized_policy == "ilp" or self.policy == "probability_model_ilp":
+            optimal_arms = self.minimize_cost_ilp(removed_plans, self.max_para, self.topk, self.nr_blocks)
         else:
-            optimal_arms = self.expected_minimum_normal_variables(removed_plans, self.topk, self.nr_blocks)
+            # optimal_arms = self.block_based_distorted_objective(removed_plans, self.topk, self.nr_blocks)
+            optimal_arms = self.dist_free_distorted_objective(removed_plans, self.topk, self.nr_blocks)
         return optimal_arms
 
-    def predicate_model(self, plan_trees, nr_threads=24):
+    def predicate_model(self, plan_trees):
         # Prune equivalent plans
         intermediate_groups = {}
         for arm_idx in plan_trees:
@@ -309,9 +313,382 @@ class Planner:
                 removed_plans = removed_plans + plan_val_list[1:]
         if self.optimized_policy == "monte carlo":
             optimal_arms = self.monte_carlo_method_predicate(removed_plans)
+        elif self.optimized_policy == "ilp":
+            optimal_arms = self.minimize_cost_ilp(removed_plans)
         else:
             optimal_arms = self.expected_minimum_normal_variables(removed_plans)
         return optimal_arms
+
+    def generate_ranges(self, removed_plans, top_k, nr_blocks, is_combined=True, use_buckets=False):
+        f_keys_to_plans = {}
+        f_keys_to_dists = {}
+        f_keys_to_buckets = {}
+        # Compute the expectation via Monte Carlo methods
+        nr_remaining_plans = 0
+        for arm_idx in self.plan_trees:
+            if arm_idx not in removed_plans:
+                nr_remaining_plans += 1
+                plan = self.plan_trees[arm_idx]
+                for f_node in plan.root.f_nodes:
+                    f_key = f_node.f_key
+                    left_key = f_key.split(":")[0].split("-")
+                    right_key = f_key.split(":")[1].split("-")
+                    f_key = frozenset(left_key).union(frozenset(right_key))
+                    if f_key not in f_keys_to_plans:
+                        f_keys_to_plans[f_key] = []
+                        f_keys_to_dists[f_key] = (f_node.d_mean, f_node.d_std)
+                        f_keys_to_buckets[f_key] = f_node.buckets
+                        # f_keys_to_dists[f_key] = (f_node.d_mean, f_node.b_std)
+                    f_keys_to_plans[f_key].append(arm_idx)
+        if is_combined:
+            reverse_dict = dict()
+            for f_key, f_set in f_keys_to_plans.items():
+                if frozenset(f_set) not in reverse_dict:
+                    reverse_dict[frozenset(f_set)] = (f_key, f_keys_to_dists[f_key])
+                else:
+                    union_set = reverse_dict[frozenset(f_set)][0].union(frozenset(f_key))
+                    f_mean = reverse_dict[frozenset(f_set)][1][0] + f_keys_to_dists[f_key][0]
+                    f_std = np.sqrt(reverse_dict[frozenset(f_set)][1][0] ** 2 + f_keys_to_dists[f_key][1] ** 2)
+                    reverse_dict[frozenset(f_set)] = (union_set, (f_mean, f_std))
+            combined_dict = dict()
+            combined_dist = dict()
+            for f_set, f_keys in reverse_dict.items():
+                combined_dict[f_keys[0]] = f_set
+                combined_dist[f_keys[0]] = f_keys[1]
+            f_keys_to_plans = combined_dict
+            f_keys_to_dists = combined_dist
+        # print("Print all plans")
+        # for f_key in f_keys_to_plans:
+        #     print(f_key, f_keys_to_plans[f_key], f_keys_to_buckets[f_key])
+        # large_f_keys = sorted([f_key for f_key in f_keys_to_plans if len(f_keys_to_plans[f_key]) < nr_remaining_plans],
+        #                       key=lambda k: f_keys_to_dists[k][1], reverse=True)[:top_k]
+        # print(f_keys_to_plans)
+        # print(f_keys_to_buckets)
+        large_f_keys = sorted([f_key for f_key in f_keys_to_plans if len(f_keys_to_plans[f_key]) < nr_remaining_plans],
+                              key=lambda k: max(list(f_keys_to_buckets[k].keys())) -
+                                            min(list(f_keys_to_buckets[k].keys())), reverse=True)[:top_k]
+        # large_f_keys = set()
+        # for arm_idx in self.plan_trees:
+        #     large_key = None
+        #     if arm_idx not in removed_plans:
+        #         plan = self.plan_trees[arm_idx]
+        #         for f_node in plan.root.f_nodes:
+        #             f_key = f_node.f_key
+        #             left_key = f_key.split(":")[0].split("-")
+        #             right_key = f_key.split(":")[1].split("-")
+        #             f_key = frozenset(left_key).union(frozenset(right_key))
+        #             if len(f_keys_to_plans[f_key]) < nr_remaining_plans:
+        #                 vals = list(f_keys_to_buckets[f_key].keys())
+        #                 delta = max(vals) - min(vals)
+        #                 if large_key is None or delta > large_key[1]:
+        #                     large_key = (f_key, delta)
+        #         large_f_keys.add(large_key[0])
+        # for large_key in large_f_keys:
+        #     print(large_key, f_keys_to_plans[large_key],
+        #           f_keys_to_buckets[large_key], sum([x * y for x, y in f_keys_to_buckets[large_key].items()]))
+        f_keys_to_ranges = {}
+        if use_buckets:
+            for k in large_f_keys:
+                value_list = list(f_keys_to_buckets[k].keys())
+                probs_list = [f_keys_to_buckets[k][v] for v in value_list]
+                plan_list = [k for _ in range(len(value_list))]
+                f_keys_to_ranges[k] = list(zip(value_list, probs_list, plan_list))
+        else:
+            for k in large_f_keys:
+                distribution = NormalDist(mu=f_keys_to_dists[k][0], sigma=f_keys_to_dists[k][1])
+                upper = f_keys_to_dists[k][0] + 3 * f_keys_to_dists[k][1]
+                min_val = -1 * upper / (2 * nr_blocks - 1)
+                lower = max(f_keys_to_dists[k][0] - 3 * f_keys_to_dists[k][1], min_val)
+                stride = max((upper - lower) / nr_blocks, 0)
+                ranges = np.arange(lower, upper, stride, dtype=float)
+                cdf_list = np.array([distribution.cdf(x) for x in ranges])
+                probs_list = cdf_list[1:] - cdf_list[:-1]
+                probs_list = probs_list / np.sum(probs_list)
+                value_list = (ranges[1:] + ranges[:-1]) / 2
+                if value_list[0] < 0:
+                    value_list[0] = 0
+                plan_list = [k for _ in range(len(value_list))]
+                f_keys_to_ranges[k] = list(zip(value_list, probs_list, plan_list))
+        f_keys_constants = {f_key: f_keys_to_plans[f_key] for f_key in f_keys_to_plans
+                            if f_key not in f_keys_to_ranges and len(f_keys_to_plans[f_key]) < nr_remaining_plans}
+        return f_keys_to_plans, f_keys_to_dists, f_keys_to_ranges, f_keys_constants
+
+    def minimize_cost_ilp(self, removed_plans, max_parallelism=-1, top_k=3, nr_blocks=20):
+        (f_keys_to_plans, f_keys_to_dists,
+         f_keys_to_ranges, f_keys_constants) = self.generate_ranges(removed_plans, top_k,
+                                                                    2, is_combined=False, use_buckets=True)
+        # if True:
+        try:
+            # Create a new model
+            m = gp.Model("minimize_cost")
+            # m.Params.LogToConsole = 0
+            # Create plan variables
+            plan_vars = {arm_idx: m.addVar(vtype=GRB.BINARY, name="p_" + str(arm_idx))
+                         for arm_idx in self.plan_trees if arm_idx not in removed_plans}
+            plan_mean_dict = {arm_idx: 0 for arm_idx in self.plan_trees if arm_idx not in removed_plans}
+            for f_key in f_keys_to_dists:
+                for arm_idx in f_keys_to_plans[f_key]:
+                    plan_mean_dict[arm_idx] += f_keys_to_dists[f_key][0]
+            M = max(list(plan_mean_dict.values())) * 10
+            PRHS = len(plan_vars) - 1
+            # f_keys_constants = {f_key: f_keys_to_plans[f_key] for f_key in f_keys_to_plans
+            #                     if f_key not in f_keys_to_ranges and len(f_keys_to_plans[f_key]) < len(plan_vars)}
+            # Create intermediate variables
+            intermediate_vars = {f_key: m.addVar(vtype=GRB.BINARY, name="i_" + str(f_key))
+                                 for f_key in f_keys_to_plans if len(f_keys_to_plans[f_key]) < len(plan_vars)}
+            # Create block variables for each intermediate result
+            # blocks_vars = {f_key: {idx: m.addVar(vtype=GRB.BINARY, name=f"{str(f_key)}_{idx}")
+            #                        for idx, b in enumerate(f_keys_to_ranges[f_key])}
+            #                for f_key in f_keys_to_ranges}
+            # Create minimum variable for each combination of blocks
+            all_combinations = list(itertools.product(*list(f_keys_to_ranges.values())))
+            combination_vars = {idx: m.addVar(vtype=GRB.INTEGER, name=f"z_{idx}")
+                                for idx, f_key in enumerate(all_combinations)}
+            extra_vars = {idx: {arm_idx: m.addVar(vtype=GRB.BINARY, name=f"z_{idx}_y_{arm_idx}")
+                                for arm_idx in plan_vars}
+                          for idx, f_key in enumerate(all_combinations)}
+
+            # Constraint 1: parallelism constraint
+            if max_parallelism > 0:
+                m.addConstr(gp.quicksum([plan_vars[arm_idx] for arm_idx in plan_vars])
+                            <= max_parallelism, "c_max_parallelism")
+
+            # Constraint 2: intermediate result in the plan is selected <=> a plan is selected
+            for arm_idx, arm_var in plan_vars.items():
+                f_keys_in_plan = [intermediate_vars[f_key] for f_key in f_keys_to_plans if arm_idx in
+                                  f_keys_to_plans[f_key] and f_key in intermediate_vars]
+                nr_im = len(f_keys_in_plan)
+                m.addConstr(gp.quicksum(f_keys_in_plan) >= nr_im * arm_var, "cp_" + str(arm_idx))
+            for f_key, f_var in intermediate_vars.items():
+                plan_vars_in_f_var = [plan_vars[arm_idx] for arm_idx in f_keys_to_plans[f_key] if arm_idx in plan_vars]
+                nr_plans = len(plan_vars_in_f_var)
+                m.addConstr(gp.quicksum(plan_vars_in_f_var) <= nr_plans * f_var, "ci_" + str(f_key))
+                m.addConstr(gp.quicksum(plan_vars_in_f_var) >= f_var, "ci2_" + str(f_key))
+
+            # Constraint 3: blocks are selected <=> the intermediate is selected
+            # for f_key, f_block_vars in blocks_vars.items():
+            #     block_var_list = list(f_block_vars.values())
+            #     nr_blocks = len(block_var_list)
+            #     m.addConstr(gp.quicksum(block_var_list) == nr_blocks * intermediate_vars[f_key], "cb_" + str(f_key))
+
+            # Constraint 4: for each combination of range blocks, solve min(min(p1, p2, ..., pn))
+            probabilities = []
+            for idx, combination in enumerate(all_combinations):
+                probability = 1
+                for block in combination:
+                    probability *= block[1]
+                probabilities.append(probability)
+                plan_cost = {arm_idx: 0 for arm_idx in plan_vars}
+                # Add the constant intermediate results
+                for f_key, plan_set in f_keys_constants.items():
+                    for arm_idx in plan_set:
+                        plan_cost[arm_idx] += f_keys_to_dists[f_key][0]
+                # Add the variable intermediate results
+                for range_tuple in combination:
+                    f_key = range_tuple[2]
+                    plan_set = f_keys_to_plans[f_key]
+                    for arm_idx in plan_set:
+                        plan_cost[arm_idx] += range_tuple[0]
+                for arm_idx, p_var in plan_vars.items():
+                    plan_cost_const = plan_cost[arm_idx] - M
+                    m.addConstr((plan_cost_const * p_var + M) <= (combination_vars[idx] +
+                                10 * M * extra_vars[idx][arm_idx]), f"cc_{idx}_p_{arm_idx}")
+                    m.addConstr(plan_cost_const * p_var >= plan_cost_const,
+                                f"tt_{idx}_p_{arm_idx}")
+                extra_vars_list = list(extra_vars[idx].values())
+                m.addConstr(gp.quicksum(extra_vars_list) == PRHS, f"cy_{idx}")
+            # m.addConstr(plan_vars[0] == 1, f"test_0")
+            # Set objective
+            m.setObjective(gp.quicksum([c_var * probabilities[idx]
+                                        for idx, c_var in combination_vars.items()]), GRB.MINIMIZE)
+            m.update()
+            m.Params.TimeLimit = 60
+            m.optimize()
+            # Optimize model
+            print('Obj: %g' % m.objVal)
+            self.nr_selected_ims = float(m.objVal) + sum([f_keys_to_dists[f_key][0]
+                                                          for f_key, plan_set in f_keys_to_plans.items()
+                                                          if len(plan_set) == len(plan_vars)])
+            optimal_arms = [arm_idx for arm_idx in plan_vars if plan_vars[arm_idx].X > 0.5]
+            print(optimal_arms)
+
+        except gp.GurobiError as e:
+            print('Error code ' + str(e.errno) + ': ' + str(e))
+            m.computeIIS()
+            m.write(f"model_{self.postgres.query_name}.ilp")
+
+        except AttributeError as e:
+            print('Encountered an attribute error: ' + str(e))
+            m.computeIIS()
+            m.write(f"model_{self.postgres.query_name}.ilp")
+        return optimal_arms
+
+    def block_based_distorted_objective(self, removed_plans, top_k=3, nr_blocks=20):
+        optimal_arms = []
+        (f_keys_to_plans, f_keys_to_dists,
+         f_keys_to_ranges, f_keys_constants) = self.generate_ranges(removed_plans, top_k, nr_blocks)
+        best_utility = sys.maxsize
+        plan_list = [arm_idx for arm_idx in self.plan_trees if arm_idx not in removed_plans]
+        if self.verbose:
+            # target_keys = [f_key for f_key in f_keys_to_plans if
+            #                1 in f_keys_to_plans[f_key] and 3 in f_keys_to_plans[f_key]]
+            # print({f_key: f_keys_to_dists[f_key] for f_key in target_keys})
+            print("f keys to plans: ", f_keys_to_plans)
+            print("f keys to dists: ", f_keys_to_dists)
+            print("f keys to ranges: ", f_keys_to_ranges)
+        all_combinations = list(itertools.product(*list(f_keys_to_ranges.values())))
+        while len(optimal_arms) < min(self.max_para, len(plan_list)):
+            if len(optimal_arms) == 0:
+                plan_exp = {arm_idx: 0 for arm_idx in plan_list}
+                for f_key, plan_set in f_keys_to_plans.items():
+                    if len(plan_set) < len(plan_list):
+                        exp = f_keys_to_dists[f_key][0]
+                        for arm_idx in plan_set:
+                            plan_exp[arm_idx] += exp
+                unique_dict = {arm_idx: 0 for arm_idx in plan_list}
+                best_arm = sorted(plan_exp.keys(), key=lambda x: plan_exp[x])[0]
+                optimal_arms.append(best_arm)
+                for f_key in f_keys_to_ranges:
+                    plan_set = f_keys_to_plans[f_key]
+                    for arm_idx in plan_set:
+                        unique_dict[arm_idx] += sum([x[0] * x[1] for x in f_keys_to_ranges[f_key]])
+                    # if best_arm in plan_set:
+                    #     variable_utility += sum([x[0] * x[1] for x in f_keys_to_ranges[f_key]])
+                for f_key in f_keys_constants:
+                    plan_set = f_keys_to_plans[f_key]
+                    for arm_idx in plan_set:
+                        unique_dict[arm_idx] += f_keys_to_dists[f_key][0]
+                    # if best_arm in plan_set:
+                    #     variable_utility += f_keys_to_dists[f_key][0]
+                best_utility = unique_dict[best_arm]
+                if self.verbose:
+                    print("Best arm:", best_arm, unique_dict, plan_exp)
+            else:
+                best_arm = None
+                next_arms = {frozenset(optimal_arms).union([arm_idx]): 0
+                             for arm_idx in plan_list if arm_idx not in optimal_arms}
+                for next_arm in next_arms:
+                    for combination in all_combinations:
+                        all_prob = 1
+                        local_plan_cost = {arm_idx: 0 for arm_idx in next_arm}
+                        for f_key in f_keys_constants:
+                            for arm_idx in next_arm:
+                                if arm_idx in f_keys_to_plans[f_key]:
+                                    local_plan_cost[arm_idx] += f_keys_to_dists[f_key][0]
+                        for value, prob, f_key in combination:
+                            all_prob *= prob
+                            for arm_idx in next_arm:
+                                if arm_idx in f_keys_to_plans[f_key]:
+                                    local_plan_cost[arm_idx] += value
+
+                        min_plan = min(list(local_plan_cost.keys()), key=lambda k: local_plan_cost[k])
+                        min_value = all_prob * local_plan_cost[min_plan]
+                        next_arms[next_arm] += min_value
+                next_arm_list = list(next_arms.keys())
+                next_arm_list.reverse()
+                local_best_arm = sorted(next_arm_list, key=lambda x: next_arms[x])[0]
+                local_utility = next_arms[local_best_arm] + self.penalty * len(optimal_arms)
+                if self.verbose:
+                    print(next_arms, local_utility, best_utility)
+                if local_utility < best_utility:
+                    best_utility = local_utility
+                    best_arm = local_best_arm
+                    optimal_arms = optimal_arms + [x for x in local_best_arm if x not in optimal_arms]
+
+            if best_arm is None:
+                break
+        self.nr_selected_ims = float(best_utility) + sum([f_keys_to_dists[f_key][0]
+                                                          for f_key, plan_set in f_keys_to_plans.items()
+                                                          if len(plan_set) == len(plan_list)])
+        return sorted(optimal_arms)
+
+    def dist_free_distorted_objective(self, removed_plans, top_k=3, nr_blocks=20):
+        optimal_arms = []
+        (f_keys_to_plans, f_keys_to_dists,
+         f_keys_to_ranges, f_keys_constants) = self.generate_ranges(removed_plans, top_k,
+                                                                    2, is_combined=False, use_buckets=True)
+        best_utility = sys.maxsize
+        plan_list = [arm_idx for arm_idx in self.plan_trees if arm_idx not in removed_plans]
+        if self.verbose:
+            print("f keys to plans: ", f_keys_to_plans)
+            print("f keys to dists: ", f_keys_to_dists)
+            print("f keys to ranges: ", f_keys_to_ranges)
+
+        # global_constant_cost = {arm_idx: 0 for arm_idx in plan_list}
+        # for f_key in f_keys_constants:
+        #     for arm_idx in f_keys_to_plans[f_key]:
+        #         global_constant_cost[arm_idx] += f_keys_to_dists[f_key][0]
+        # combination_dict = {arm_idx: np.full(len(all_combinations), global_constant_cost[arm_idx])
+        #                     for arm_idx in plan_list}
+        # for arm_idx in plan_list:
+
+        while len(optimal_arms) < min(self.max_para, len(plan_list)):
+            if len(optimal_arms) == 0:
+                plan_exp = {arm_idx: 0 for arm_idx in plan_list}
+                for f_key, plan_set in f_keys_to_plans.items():
+                    if len(plan_set) < len(plan_list):
+                        exp = f_keys_to_dists[f_key][0]
+                        for arm_idx in plan_set:
+                            plan_exp[arm_idx] += exp
+                unique_dict = {arm_idx: 0 for arm_idx in plan_list}
+                best_arm = sorted(plan_exp.keys(), key=lambda x: plan_exp[x])[0]
+                for f_key in f_keys_to_ranges:
+                    plan_set = f_keys_to_plans[f_key]
+                    for arm_idx in plan_set:
+                        unique_dict[arm_idx] += sum([x[0] * x[1] for x in f_keys_to_ranges[f_key]])
+                    # if best_arm in plan_set:
+                    #     variable_utility += sum([x[0] * x[1] for x in f_keys_to_ranges[f_key]])
+                for f_key in f_keys_constants:
+                    plan_set = f_keys_to_plans[f_key]
+                    for arm_idx in plan_set:
+                        unique_dict[arm_idx] += f_keys_to_dists[f_key][0]
+                    # if best_arm in plan_set:
+                    #     variable_utility += f_keys_to_dists[f_key][0]
+                # best_arm = 0
+                best_utility = unique_dict[best_arm]
+                optimal_arms.append(best_arm)
+                print("Best arm:", best_arm, unique_dict, plan_exp)
+            else:
+                best_arm = None
+                next_arms = {frozenset(optimal_arms).union([arm_idx]): 0
+                             for arm_idx in plan_list if arm_idx not in optimal_arms}
+                for next_arm in next_arms:
+                    arm_ranges = [r for k, r in f_keys_to_ranges.items() if
+                                  len(next_arm.intersection(f_keys_to_plans[k])) > 0]
+                    all_combinations = list(itertools.product(*arm_ranges))
+                    local_constant_cost = {arm_idx: 0 for arm_idx in next_arm}
+                    for f_key in f_keys_constants:
+                        for arm_idx in next_arm:
+                            if arm_idx in f_keys_to_plans[f_key]:
+                                local_constant_cost[arm_idx] += f_keys_to_dists[f_key][0]
+                    for combination in all_combinations:
+                        all_prob = 1
+                        local_plan_cost = local_constant_cost.copy()
+                        for value, prob, f_key in combination:
+                            all_prob *= prob
+                            for arm_idx in next_arm:
+                                if arm_idx in f_keys_to_plans[f_key]:
+                                    local_plan_cost[arm_idx] += value
+                        min_plan = min(list(local_plan_cost.keys()), key=lambda k: local_plan_cost[k])
+                        min_value = all_prob * local_plan_cost[min_plan]
+                        next_arms[next_arm] += min_value
+                next_arm_list = list(next_arms.keys())
+                next_arm_list.reverse()
+                local_best_arm = sorted(next_arm_list, key=lambda x: next_arms[x])[0]
+                local_utility = next_arms[local_best_arm] # + self.penalty * len(optimal_arms)
+                if self.verbose:
+                    print(next_arms, local_utility, best_utility)
+                if local_utility < best_utility:
+                    best_utility = local_utility
+                    best_arm = local_best_arm
+                    optimal_arms = optimal_arms + [x for x in local_best_arm if x not in optimal_arms]
+
+            if best_arm is None:
+                break
+        self.nr_selected_ims = float(best_utility) + sum([f_keys_to_dists[f_key][0]
+                                                          for f_key, plan_set in f_keys_to_plans.items()
+                                                          if len(plan_set) == len(plan_list)])
+        return sorted(optimal_arms)
 
     def expected_minimum_normal_variables(self, removed_plans, top_k=3, nr_blocks=20):
         optimal_arms = []
@@ -433,9 +810,9 @@ class Planner:
                         min_value = all_prob * local_plan_cost[min_plan]
                         next_arms[next_arm] += min_value
                 local_best_arm = sorted(next_arms.keys(), key=lambda x: next_arms[x])[0]
-                local_utility = next_arms[local_best_arm] + 0.1 * len(optimal_arms)
+                local_utility = next_arms[local_best_arm] + self.penalty * len(optimal_arms)
                 if self.verbose:
-                    print(next_arms)
+                    print(next_arms, local_utility, best_utility)
                 if local_utility < best_utility:
                     best_utility = local_utility
                     best_arm = local_best_arm
