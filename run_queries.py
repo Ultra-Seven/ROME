@@ -1,11 +1,12 @@
 import argparse
-import json
 import os
 import signal
 import sys
 from itertools import combinations
 from time import time, sleep
 import subprocess
+
+import psycopg2
 from scipy.stats import chi2_contingency
 import csv
 import itertools
@@ -18,6 +19,7 @@ from plan.plan_tree import PlanTree
 from plan.planner import Planner
 import psutil
 
+from utils.pg_utils import create_connection
 from utils.sql_utils import extract_tables, get_join_predicates
 
 query_dir = sys.argv[1]
@@ -106,7 +108,6 @@ def _arm_idx_to_hints(arm_idx):
         raise Exception("RegBlocker only supports the first 5 arms")
     return hints
 
-
 def _arm_idx_to_perm_hints(arm_idx):
     flag_combination = flag_combinations_list[arm_idx]
     hints = [f"SET {f} TO {'on' if flag_combination[f_idx] == 1 else 'off'};"
@@ -122,7 +123,7 @@ def parse_postgres_plan(plan):
 
 def find_arms(sql, postgres, full=False,
               method_name="max_results", nr_parallelism=3,
-              query_name="default", solver="greedy"):
+              query_name="default", solver="greedy", conn=None):
     plan_trees = {}
     if full:
         nr_arms = 2 ** len(_ALL_OPTIONS)
@@ -147,11 +148,11 @@ def find_arms(sql, postgres, full=False,
                                  query_name=query_name)
     planner = Planner(plan_trees, postgres, 24,
                       topk, blocks, method_name, nr_parallelism,
-                      solver=solver, penalty=penalty)
+                      solver=solver, penalty=penalty, conn=conn)
     plan_start = time()
     optimal_arms = planner.optimal_arms(plan_trees)
     plan_end = time()
-    return optimal_arms, plan_end - plan_start, planner.nr_selected_ims
+    return optimal_arms, plan_end - plan_start, planner.nr_selected_ims, planner
 
 
 def check_arms(sql, postgres):
@@ -246,7 +247,7 @@ def traverse_plan_node(node):
         return return_list
 
 
-def run_query(sql, nr_threads, arms, full=False, use_psql=0):
+def run_query(sql, nr_threads, arms, full=False, use_psql=0, hint_dict=None):
     start = time()
     try:
         if not sql.endswith(";"):
@@ -254,18 +255,29 @@ def run_query(sql, nr_threads, arms, full=False, use_psql=0):
 
         procs_list = []
         for x in range(len(arms)):
-            if full:
-                hints = _arm_idx_to_perm_hints(arms[x])
+            if hint_dict is None:
+                if full:
+                    hints = _arm_idx_to_perm_hints(arms[x])
+                else:
+                    hints = _arm_idx_to_hints(arms[x])
             else:
-                hints = _arm_idx_to_hints(arms[x])
-            # execute_sql = f"\nSET statement_timeout = 60000;\n"
+                hints = [hint_dict[arms[x]]]
+            execute_sql = f"\nSET statement_timeout = 60000;\n"
             execute_sql = f"SET max_parallel_workers = {nr_threads};\n" \
                           f"SET max_parallel_workers_per_gather = {nr_threads};" \
                           f"\nSET statement_timeout = 60000;\n"
+            # execute_sql = f"SET max_parallel_workers = 8;\n" \
+            #               f"SET max_parallel_workers_per_gather = 2;" \
+            #               f"\nSET statement_timeout = 60000;\n"
             execute_sql += ("\n".join(hints) + "\n")
             execute_sql += sql
-            worker = subprocess.Popen(['psql', '-h', 'localhost', '-U', 'postgres', '-d',
-                                       database, '-c', execute_sql], stdout=subprocess.PIPE)
+            if hint_dict is not None:
+                worker = subprocess.Popen(['psql', '-h', 'localhost', '-U', 'postgres', '-d',
+                                           database, '-c', "LOAD 'pg_hint_plan';",
+                                           '-c', execute_sql], stdout=subprocess.PIPE)
+            else:
+                worker = subprocess.Popen(['psql', '-h', 'localhost', '-U', 'postgres', '-d',
+                                           database, '-c', execute_sql], stdout=subprocess.PIPE)
             print(f"Registering process {worker.pid}")
             procs_list.append(psutil.Process(worker.pid))
         if use_psql == 1:
@@ -337,6 +349,88 @@ def run_query(sql, nr_threads, arms, full=False, use_psql=0):
     return stop - start
 
 
+def run_bouquet_query(sql, arms, conn, scale=2.):
+    start = time()
+    nr_plans_check = 0
+    success = 0
+    sql = sql.strip()
+    try:
+        if not sql.endswith(";"):
+            sql = sql + ";"
+        max_len = min(len(arms), 7)
+        timeout_list = [1000, 2000, 4000, 8000, 16000, 29000]
+        if max_len == 1:
+            timeout_list[max_len - 1] = 60000
+        else:
+            timeout_list[max_len - 1] = (60000 - sum(timeout_list[:(max_len-1)]))
+        for idx in range(max_len):
+            hints = arms[idx]
+            timeout = timeout_list[idx]
+            # execute_sql = f"\nSET statement_timeout = {timeout};\n"
+            execute_sql = hints + "\n" + sql
+            # execute_sql += sql
+            nr_plans_check = idx + 1
+            try:
+                set_sql = (f"SET statement_timeout = {timeout};\nSET max_parallel_workers = 24;"
+                           f"\nSET max_parallel_workers_per_gather = 24;")
+                print("Running: " + hints)
+                result = subprocess.run(['psql', '-h', 'localhost',
+                                         '-U', 'postgres', '-d', database, '-XqAt',
+                                         '-c', "LOAD 'pg_hint_plan';", '-c',
+                                         set_sql, '-c', execute_sql],
+                                        stdout=subprocess.PIPE)
+                result_str = result.stdout.decode('utf-8')
+                print("Results: " + result_str)
+                if result_str.strip() == '':
+                    continue
+                else:
+                    success = 1
+                    print("Successfully executed query with hint: " + hints)
+                    break
+            except Exception as e:
+                print(e)
+                continue
+        stop = time()
+        def on_terminate(proc):
+            print("process {} terminated".format(proc) + ": " + str(time() - start))
+        remaining_procs = []
+        for proces in psutil.process_iter():
+            try:
+                process_args_list = proces.cmdline()
+                if any(["parallel worker" in x for x in process_args_list]):
+                    remaining_procs.append(psutil.Process(proces.pid))
+            except Exception as e:
+                continue
+        while True:
+            gone, alive = psutil.wait_procs(remaining_procs, timeout=60, callback=on_terminate)
+            for alive_proc in alive:
+                os.kill(alive_proc.pid, signal.SIGKILL)
+            if len(alive) == 0:
+                break
+        result = subprocess.Popen(['pg_ctl', '-D', '/export/pgdata/', 'restart'],
+                                  stdout=subprocess.PIPE)
+        remaining_procs = []
+        for proces in psutil.process_iter():
+            try:
+                process_args_list = proces.cmdline()
+                if any(["pg_ctl" in x for x in process_args_list]):
+                    remaining_procs.append(psutil.Process(proces.pid))
+            except Exception as e:
+                continue
+        while True:
+            gone, alive = psutil.wait_procs(remaining_procs, timeout=60, callback=on_terminate)
+            for alive_proc in alive:
+                os.kill(alive_proc.pid, signal.SIGKILL)
+            if len(alive) == 0:
+                break
+        print("Restarting done!")
+    except Exception as e:
+        print(e)
+        stop = time()
+
+    return stop - start, nr_plans_check, success
+
+
 def run_baseline_query(sql, nr_threads):
     start = time()
     try:
@@ -378,13 +472,14 @@ def benchmark(method_name, nr_parallelism, use_psql=False,
     queries = []
     BASELINE = False
     postgres = Postgres("localhost", 5432, "postgres", "postgres", database)
-    postgres.close()
     postgres.uncertainty = uncertainty
     postgres.nr_blocks = blocks
-
+    if method_name == "create_db":
+        create_larger_database(database, postgres, 4)
+    postgres.close()
     for fp in os.listdir(query_dir):
-        if fp.endswith(".sql"):
-        # if fp.endswith(".sql") and fp in ["q12-002.sql"]:
+        # if fp.endswith(".sql"):
+        if fp.endswith(".sql") and fp in ["28a.sql"]:
             with open(os.path.join(query_dir, fp)) as f:
                 query = f.read()
                 queries.append((fp, query))
@@ -395,6 +490,8 @@ def benchmark(method_name, nr_parallelism, use_psql=False,
     print("Read", len(queries), "queries.")
     total_threads = 24
     is_full = is_full
+    conn = None
+
     for x in range(nr_runs):
         with open(f"results/{output_file}_{x}.csv", 'w', newline='') as csvfile:
             spamwriter = csv.writer(csvfile, delimiter=',',
@@ -414,31 +511,78 @@ def benchmark(method_name, nr_parallelism, use_psql=False,
                     else:
                         postgres.set_sql_query(q, query_name)
                         if use_psql:
-                            arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
+                            arms, plan_time, nr_ims, planner = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
                                                                 nr_parallelism=nr_parallelism-1,
                                                                 query_name=query_name,
                                                                 solver=solver)
                         else:
-                            arms, plan_time, nr_ims = find_arms(q, postgres, full=is_full,
+                            arms, plan_time, nr_ims, planner = find_arms(q, postgres, full=is_full,
                                                                 method_name=method_name,
                                                                 nr_parallelism=nr_parallelism,
                                                                 query_name=query_name,
-                                                                solver=solver)
-                        arm_nr_threads = (total_threads // len(arms))
-                        print(fp, arms)
-                        # q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
-                        q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
-                        # q_time = run_baseline_query(q, total_threads)
-                        # query_name = fp.split("/")[-1].split(".")[0]
-                        spamwriter.writerow([str(idx), str(arm_nr_threads), fp,
-                                             str(q_time), "-".join([str(x) for x in arms]),
-                                             str(plan_time), str(nr_ims)])
-                        print(idx, arm_nr_threads, fp, q_time, arms, nr_ims, flush=True)
+                                                                solver=solver, conn=conn)
+                        if method_name == "bouquet":
+                            q_time, nr_plans_check, success = run_bouquet_query(q, arms, conn, scale=1.5)
+                            spamwriter.writerow([str(idx), success, fp,
+                                                 str(q_time), str(len(arms)),
+                                                 str(plan_time), str(nr_plans_check)])
+                            print(idx, success, fp, q_time, str(len(arms)), str(nr_plans_check), flush=True)
+                        elif method_name == "rome_bouquet":
+                            hint_dict = {}
+                            plan_trees = {}
+                            for hint_idx, hint in enumerate(arms):
+                                hint_dict[hint_idx] = hint
+                                plan_trees[hint_idx] = PlanTree(postgres.sql, planner.bouquet_plans[hint], postgres,
+                                                                visualization=False,
+                                                                pid=hint_idx,
+                                                                query_name=query_name)
+
+                            new_planner = Planner(plan_trees, postgres, 24,
+                                                  topk, blocks, "probability_model", nr_parallelism,
+                                                  solver=solver, penalty=penalty, conn=conn)
+                            optimal_arms = new_planner.optimal_arms(plan_trees)
+                            arm_nr_threads = (total_threads // len(optimal_arms))
+                            print(fp, optimal_arms)
+                            # q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
+                            q_time = run_query(q, arm_nr_threads, optimal_arms, full=is_full,
+                                               use_psql=use_psql, hint_dict=hint_dict)
+                            # q_time = run_baseline_query(q, total_threads)
+                            # query_name = fp.split("/")[-1].split(".")[0]
+                            spamwriter.writerow([str(idx), str(arm_nr_threads), fp,
+                                                 str(q_time), "-".join([str(x) for x in optimal_arms]),
+                                                 str(plan_time), str(nr_ims)])
+                            print(idx, arm_nr_threads, fp, q_time, optimal_arms, nr_ims, flush=True)
+                        elif method_name == "bouquet_topk":
+                            hint_dict = {}
+                            for hint_idx, hint in enumerate(arms):
+                                hint_dict[hint_idx] = hint
+
+                            optimal_arms = list(range(min(nr_parallelism, len(arms))))
+                            arm_nr_threads = (total_threads // len(optimal_arms))
+                            print(fp, optimal_arms)
+                            q_time = run_query(q, arm_nr_threads, optimal_arms, full=is_full,
+                                               use_psql=use_psql, hint_dict=hint_dict)
+                            spamwriter.writerow([str(idx), str(arm_nr_threads), fp,
+                                                 str(q_time), "-".join([str(x) for x in optimal_arms]),
+                                                 str(plan_time), str(nr_ims)])
+                            print(idx, arm_nr_threads, fp, q_time, optimal_arms, nr_ims, flush=True)
+                        else:
+                            arm_nr_threads = (total_threads // len(arms))
+                            print(fp, arms)
+                            # q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
+                            q_time = run_query(q, arm_nr_threads, arms, full=is_full, use_psql=use_psql)
+                            # q_time = run_baseline_query(q, total_threads)
+                            # query_name = fp.split("/")[-1].split(".")[0]
+                            spamwriter.writerow([str(idx), str(arm_nr_threads), fp,
+                                                 str(q_time), "-".join([str(x) for x in arms]),
+                                                 str(plan_time), str(nr_ims)])
+                            print(idx, arm_nr_threads, fp, q_time, arms, nr_ims, flush=True)
                 # except Exception as e:
                 #     print(e)
                 #     print(f"Unsupported query {fp}")
-
+    if conn:
+        conn.close()
 
 def selectivity_analysis():
     query_dir = sys.argv[1]
@@ -704,6 +848,36 @@ def stress_analysis():
         nr_overlapped = len([im for im in covered_im_results if len(covered_im_results[im]) > 1])
         overlapped_list.append(nr_overlapped)
     print(np.mean(nr_overlapped))
+
+
+def create_larger_database(db_name, postgres, nr_times):
+    new_db_name = f"{db_name}_{nr_times}"
+    new_pg_conn = psycopg2.connect(
+        dbname=new_db_name,
+        user="postgres",
+        password="postgres",
+        host="localhost",
+        port=5432
+    )
+    for table_name in postgres.table_sizes:
+        cur = new_pg_conn.cursor()
+        pg_cur = postgres.connection.cursor()
+        pg_cur.execute("SELECT * FROM " + table_name + ";")
+        results = pg_cur.fetchall()
+        start_row = 1
+        for x in range(nr_times):
+            for idx, r in enumerate(results):
+                new_r = list(r)
+                new_r[0] = start_row
+                new_r = [f"$${v.replace('$', '')}$$" if isinstance(v, str) else
+                         ("NULL" if v is None else str(v)) for v in new_r]
+                new_r_str = "(" + (", ".join(new_r)) + ")"
+                new_sql = "INSERT INTO " + table_name + " VALUES " + new_r_str
+                cur.execute(new_sql)
+                start_row += 1
+        print("Finished", table_name)
+        new_pg_conn.commit()
+    sys.exit(0)
 
 
 def intermediate_result(sql_path):

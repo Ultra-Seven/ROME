@@ -1,0 +1,13 @@
+cairocffi==1.4.0
+gurobipy==10.0.2
+igraph==0.10.3
+numpy==1.25.2
+pandas==2.0.3
+protobuf==3.20.1
+psutil==5.9.4
+psycopg2==2.9.7
+pycairo==1.23.0
+python-dateutil==2.8.2
+python-igraph==0.10.3
+six==1.16.0
+scipy==1.8.1

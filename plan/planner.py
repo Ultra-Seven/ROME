@@ -1,4 +1,7 @@
 import itertools
+import re
+import subprocess
+import time
 import sys
 from itertools import chain, combinations
 from statistics import NormalDist
@@ -8,13 +11,21 @@ import gurobipy as gp
 from gurobipy import GRB
 
 from db.postgres import Postgres
-from utils.pg_utils import get_im_result_count
+from plan.plan_tree import PlanTree
+from utils.pg_utils import get_im_result_count, create_connection
+from utils.sql_utils import get_join_predicates
 
 
 class Planner:
     def __init__(self, plan_trees, postgres, nr_threads=24,
                  topk=3, nr_blocks=10,
-                 method="max_results", max_para=3, solver="greedy", penalty=0.1):
+                 method="max_results",
+                 max_para=3, solver="greedy", penalty=0.1, conn=None):
+        self.f_keys_constants = None
+        self.f_keys_to_ranges = None
+        self.f_keys_to_plans = None
+        self.f_keys_to_dists = None
+
         self.nr_selected_ims = -1
         self.plan_trees = plan_trees
         self.postgres = postgres
@@ -26,6 +37,8 @@ class Planner:
         self.max_para = max_para
         self.nr_blocks = int(nr_blocks)
         self.penalty = penalty
+        self.conn = conn
+        self.bouquet_plans = {}
 
     def optimal_arms(self, plan_trees):
         # return self.greedy_max_accurate_plan(plan_trees)
@@ -35,12 +48,16 @@ class Planner:
             return self.maximize_unique_im_ilp()
         if self.policy == "max_im_ilp_parallel":
             return self.maximize_unique_im_ilp(self.max_para)
-        elif self.policy == "fix plan":
-            return [5]
+        elif self.policy == "fix_plan":
+            return [self.max_para]
         elif self.policy == "probability_model":
             return self.probability_model(plan_trees, mat_im=False)
         elif self.policy == "predicate":
             return self.predicate_model(plan_trees)
+        elif self.policy == "topk_least":
+            return self.topk_least(plan_trees, self.max_para)
+        elif self.policy == "bouquet" or self.policy == "rome_bouquet" or self.policy == "bouquet_topk":
+            return self.plan_bouquet(topk=self.max_para, json=(self.policy == "rome_bouquet"))
         else:
             return self.probability_model(plan_trees, mat_im=False)
 
@@ -238,6 +255,118 @@ class Planner:
             optimal_arms.append(best_arm)
             best_arm = None
         return optimal_arms
+
+    def topk_least(self, plan_trees, topk=3):
+        plan_intermediate_results = {arm_idx: set([f_node.f_key for f_node in self.plan_trees[arm_idx].root.f_nodes])
+                                     for arm_idx in self.plan_trees}
+        covered = set()
+        total_cost_dict = {}
+        for arm_idx in plan_trees:
+            total_cost = plan_trees[arm_idx].plan['Plan']['Total Cost']
+            total_cost_dict[total_cost] = arm_idx
+        sorted_costs = sorted(list(total_cost_dict.keys()))[:topk]
+        sorted_arms = [total_cost_dict[c] for c in sorted_costs]
+        for best_arm in sorted_arms:
+            best_set = plan_intermediate_results[best_arm]
+            # Add the set to the minimum set coverage
+            covered |= best_set
+        self.nr_selected_ims = len(list(covered))
+        return sorted_arms
+
+    def plan_bouquet(self, topk=3, nr_blocks=5, nr_predicates=3, json=False):
+        self.bouquet_plans = {}
+        sql = self.postgres.sql.replace(";", "")
+        join_predicates = get_join_predicates(sql)
+        table_pairs = set()
+        def get_op(predicate):
+            if ">=" in predicate:
+                return ">="
+            elif "<=" in predicate:
+                return "<="
+            elif "<" in predicate:
+                return "<"
+            elif ">" in predicate:
+                return ">"
+            else:
+                return "="
+        for join_predicate in join_predicates:
+            op = get_op(join_predicate)
+            join_list = join_predicate.split(op)
+            left_alias = join_list[0].strip().split(".")[0]
+            right_alias = join_list[1].strip().split(".")[0]
+            if left_alias > right_alias:
+                table_pairs.add((right_alias, left_alias))
+            else:
+                table_pairs.add((left_alias, right_alias))
+        unary_predicates = [u.strip() for u in sql.split("WHERE")[-1].split("AND")
+                            if u.strip() not in join_predicates]
+        table_pairs = sorted(list(table_pairs))
+        priority_pairs = set()
+        not_priority_pairs = set()
+        for unary_predicate in unary_predicates:
+            if ("LIKE " in unary_predicate.upper() or ">" in unary_predicate or
+                    "<" in unary_predicate or " IN " in unary_predicate.upper()
+                    or " BETWEEN " in unary_predicate.upper()):
+                for p in table_pairs:
+                    if p not in priority_pairs and (f"{p[0]}." in unary_predicate or f"{p[1]}." in unary_predicate):
+                        priority_pairs.add(p)
+                        print(p, unary_predicate)
+                        break
+                if len(priority_pairs) == nr_predicates:
+                    break
+        for unary_predicate in unary_predicates:
+            if not ("LIKE " in unary_predicate.upper() or ">" in unary_predicate or
+                    "<" in unary_predicate or " IN " in unary_predicate.upper()
+                    or " BETWEEN " in unary_predicate.upper()):
+                for p in table_pairs:
+                    if p not in priority_pairs and (f"{p[0]}." in unary_predicate or f"{p[1]}." in unary_predicate):
+                        not_priority_pairs.add(p)
+        not_priority_pairs = sorted(list(not_priority_pairs))
+        while len(priority_pairs) < nr_predicates and len(not_priority_pairs) > 0:
+            priority_pairs.add(not_priority_pairs.pop())
+        # Generate hyperspace
+        block_dict = {}
+        for p in priority_pairs:
+            max_size = self.postgres.alias_to_rows[p[0]] * self.postgres.alias_to_rows[p[1]]
+            block_size = max_size // nr_blocks + 1
+            block_lefts = np.arange(0, max_size, block_size)
+            block_lefts = block_lefts + 1
+            block_dict[p] = block_lefts
+
+        keys = list(block_dict.keys())
+        values = [block_dict[k] for k in keys]
+        all_combinations = list(itertools.product(*list(values)))
+        hint_dict = {}
+        value_set = set()
+        for c in all_combinations:
+            hints = []
+            for idx, card in enumerate(c):
+                hints.append(f"Rows ({keys[idx][0]} {keys[idx][1]} #{card})")
+            hint_comment = f"/*+\n" + "\n".join(hints) + "\n*/"
+            if json:
+                target_sql = f"EXPLAIN (COSTS, VERBOSE, FORMAT JSON) {hint_comment} {sql};"
+            else:
+                target_sql = f"EXPLAIN {hint_comment} {sql};"
+
+            # cur.execute(target_sql)
+            # results = cur.fetchall()
+            # costs = [int(x.split("=")[-1]) for x in re.findall(r"cost=\d+", results[0][0])]
+            result = subprocess.run(['psql', '-h', 'localhost',
+                                     '-U', 'postgres', '-d', self.postgres.database, '-XqAt',
+                                     '-c', "LOAD 'pg_hint_plan';", '-c', target_sql],
+                                    stdout=subprocess.PIPE)
+            self.bouquet_plans[hint_comment] = result
+            result_str = result.stdout.decode('utf-8')
+            if json:
+                costs = [int(x.split(": ")[-1]) for x in re.findall(r'"Total Cost": \d+', result_str)]
+            else:
+                costs = [int(x.split("=")[-1]) for x in re.findall(r"cost=\d+", result_str)]
+            cost = max(costs)
+            if cost not in value_set:
+                value_set.add(cost)
+                hint_dict[hint_comment] = cost
+        sorted_cost_hints = sorted(list(hint_dict.keys()), key=lambda x: hint_dict[x])
+        return sorted_cost_hints[:topk]
 
     def probability_model(self, plan_trees, nr_threads=24, mat_im=False):
         # Prune equivalent plans
@@ -607,6 +736,10 @@ class Planner:
         (f_keys_to_plans, f_keys_to_dists,
          f_keys_to_ranges, f_keys_constants) = self.generate_ranges(removed_plans, top_k,
                                                                     2, is_combined=False, use_buckets=True)
+        self.f_keys_to_plans = f_keys_to_plans
+        self.f_keys_to_dists = f_keys_to_dists
+        self.f_keys_to_ranges = f_keys_to_ranges
+        self.f_keys_constants = f_keys_constants
         best_utility = sys.maxsize
         plan_list = [arm_idx for arm_idx in self.plan_trees if arm_idx not in removed_plans]
         if self.verbose:

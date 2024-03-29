@@ -29,10 +29,11 @@ from visitors.predicate_visitor import PredicateVisitor
 
 class PlanTree:
     def __init__(self, sql, result, postgres,
-                 visualization=True, pid=-1, query_name="default"):
-        self.decoded_plan = result.stdout.decode('utf-8')
-        # print(self.decoded_plan)
-        query_plan = json.loads(self.decoded_plan)
+                 visualization=True, pid=-1, query_name="default", query_plan=None):
+        if query_plan is None:
+            self.decoded_plan = result.stdout.decode('utf-8')
+            # print(self.decoded_plan)
+            query_plan = json.loads(self.decoded_plan)
         self.plan = query_plan[0]
         self.postgres = postgres
         # Generate intermediate tables
@@ -144,6 +145,38 @@ class PlanTree:
         if not os.path.exists(f'./figs/{self.query_name}'):
             os.mkdir(f'./figs/{self.query_name}')
         ig.plot(g, target=f'./figs/{self.query_name}/{self.pid}.pdf', **visual_style)
+
+    def to_dict(self, node, key="plan_rows"):
+        if node is None:
+            return None
+        if node.f_key is None and hasattr(node, "alias"):
+            return {
+                "name": node.alias,
+                "value": getattr(node, key),
+                "type": node.node_type,
+                "children": []
+        }
+        elif node.f_key is None and not hasattr(node, "alias") and len(node.children) == 1:
+            return self.to_dict(node.children[0], key=key)
+        elif node.f_key is None and not hasattr(node, "alias") and len(node.children) == 0:
+            return None
+        node_dict = {
+            "name": node.f_key if node.f_key is not None else node.alias,
+            "value": getattr(node, key),
+            "node_type": node.node_type,
+            "children": []
+        }
+        if len(node.children) == 1 and node.children[0].f_key == node.f_key:
+            child_node_dict = self.to_dict(node.children[0], key=key)
+            for child_dict in child_node_dict["children"]:
+                node_dict["children"].append(child_dict)
+            return node_dict
+        elif len(node.children) == 0:
+            return node_dict
+        else:
+            for idx, child in enumerate(node.children):
+                node_dict["children"].append(self.to_dict(child, key=key))
+            return node_dict
 
     def add_edges(self, node, g, nid, added_vertices):
         c = "{:.2e}".format(node.cost)
