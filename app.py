@@ -2,7 +2,6 @@ import asyncio
 import os
 import subprocess
 import sys
-import re
 import aiopg
 import pandas as pd
 import psycopg2
@@ -109,7 +108,9 @@ st.markdown(
 
 
 st.sidebar.markdown("## Select Dataset and Parameters")
-
+pm_name = "Probability Model"
+mpd_name = "Maximizing Plan Diversity"
+default_name = "PostgreSQL"
 
 # -- Set time by GPS or event
 select_dataset = st.sidebar.selectbox('Dataset', ['Join Order Benchmark', 'Stackoverflow', 'Upload your own dataset'])
@@ -142,7 +143,7 @@ else:
         print(uploaded_df)
     # st.stop()
 
-select_solver = st.sidebar.selectbox('Plan Selector', ['Default', 'MPD', 'PM', 'Manual'])
+select_solver = st.sidebar.selectbox('Plan Selector', [default_name, mpd_name, pm_name, 'Manual'])
 if query_dict is not None and dataset_queries is not None:
     query = st.text_area('Query', query_dict[dataset_queries].strip(), height=200)
 else:
@@ -152,20 +153,21 @@ rerun = False
 def click_button():
     rerun = True
     for key in st.session_state.keys():
-        del st.session_state[key]
+        if key != "query_logs":
+            del st.session_state[key]
 
 
-# st.sidebar.button('Rerun', on_click=click_button)
+st.sidebar.button('Rerun', on_click=click_button)
 
 # -- Create sidebar for plot controls
 st.sidebar.markdown('## Set System Parameters')
-if select_solver == "Default":
+if select_solver == default_name:
     nr_plans = 1
-elif select_solver == "MPD" or select_solver == "PM":
+elif select_solver == mpd_name or select_solver == pm_name:
     # Nr. alternative plans
     nr_plans = st.sidebar.slider('Nr. parallel plans', 1, 10, 3)
 check_boxes = []
-if select_solver == "PM":
+if select_solver == pm_name:
     # Nr. intermediate results
     k = st.sidebar.slider('Nr. intermediate results', 1, 10, 3)
     # Nr. blocks
@@ -240,13 +242,13 @@ def find_arms(sql, postgres, method_name="max_results",
     nr_arms = 6
     solver = "greedy" if "ILP" not in method_name else "ilp"
     method = method_name.split("-")[0]
-    if method == "MPD" and solver == "ilp":
+    if method == mpd_name and solver == "ilp":
         method = "max_im_ilp_parallel"
-    elif method == "PM":
+    elif method == pm_name:
         method = "probability_model"
-    elif method == "MPD" and solver == "greedy":
+    elif method == mpd_name and solver == "greedy":
         method = "max_results"
-    elif method == "Default":
+    elif method == default_name:
         method = "Default"
     elif method == "Manual":
         method = "Manual"
@@ -318,9 +320,9 @@ else:
     rerun = True
 arms = sorted(arms)
 col1, col2 = st.columns([0.6, 0.4])
-font_size = 20
+font_size = 15
 label_size = 20
-height = "450px"
+height = "700px"
 with col1:
     st.subheader("Plan Selection")
 
@@ -640,11 +642,11 @@ with col1:
         variance_dict = {}
         min_val = sys.maxsize
         max_val = 0
-        if select_solver == "PM":
+        if select_solver == pm_name:
             planner = st.session_state['planner']
             print(planner.f_keys_to_ranges, flush=True)
             for f_key in planner.f_keys_to_ranges:
-                for val, prob, k in planner.f_keys_to_ranges[f_key]:
+                for val, prob, _ in planner.f_keys_to_ranges[f_key]:
                     variance_dict[f_key] = variance_dict.get(f_key, 0) + prob * val
                 variance_dict[f_key] = variance_dict[f_key] ** 0.5
 
@@ -778,17 +780,46 @@ with col2:
         for hint in optimal_hints:
             hint_dict[hint.split(" ")[1]] = hint
         st.markdown(f"The optimal plan is **:blue[Plan {best_plan}]** with hints:")
-        for h_key in _ALL_OPTIONS:
-            st.markdown(hint_dict[h_key])
+        with st.expander("Optimal Hints"):
+            for h_key in _ALL_OPTIONS:
+                st.markdown(hint_dict[h_key])
     else:
         if query_time > timeout // 1000:
             st.warning(f"Query execution timeout after {timeout} seconds")
         else:
             st.warning("Query execution failed")
 
+    with st.expander("Query Logs"):
 
-st.subheader("About the ROME")
+        from datetime import datetime
+        now = datetime.now()
+        date_time = now.strftime("%m/%d/%Y, %H:%M:%S")
+        logs = []
+        if "query_logs" in st.session_state:
+            logs = st.session_state['query_logs']
+        parameters = []
+        parameters.append(f"Nr. Plans: {nr_plans}")
+        if select_solver == pm_name:
+            parameters.append(f"Nr. Intermediate Results: {k}")
+            parameters.append(f"Nr. Blocks: {b}")
+        parameters.append(f"Timeout: {timeout} seconds")
+        parameter_str = "\n".join(parameters)
+        logs.append(f"{date_time} - Query: {dataset_queries}\nSelector: {select_solver}\n{parameter_str}\n"
+                    f"Performance: Plan {best_plan} - Time: {query_time:.2f} seconds")
+        txt = st.text_area(
+            "",
+            "\n".join(logs),
+            height=200,
+        )
+        st.session_state['query_logs'] = logs
+
+        def clear_click_button():
+            del st.session_state['query_logs']
+
+        st.button("Clear logs", on_click=clear_click_button)
+
+
+st.subheader("About ROME")
 st.markdown("""
-You can see how this works in the [Quickview Jupyter Notebook](https://github.com/losc-tutorial/quickview) or 
-[see the code](https://github.com/Ultra-Seven/ParaRQO).
+Explore the [code](https://github.com/Ultra-Seven/ROME) on Github.
 """)

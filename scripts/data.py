@@ -118,6 +118,7 @@ def performance_evaluation():
                "greedy_poirange_para5_pm",
                "greedy_poirange_para6_pm",
                "greedy_top3_least",
+               "max_imdb_fix_plan_0",
                "imdb_bouquet",
                "imdb_bouquet_topk",
                "imdb_rome_bouquet"
@@ -785,7 +786,7 @@ def calculate_variance():
 
 if __name__ == '__main__':
     performance_evaluation()
-    evaluate_so_performance()
+    # evaluate_so_performance()
     # time_vs_quality()
     # im_analysis_per_query()
     # analyze_per_query_performance()

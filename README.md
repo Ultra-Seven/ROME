@@ -1,4 +1,4 @@
-## ROME: : Robust Query Optimization via Parallel Multi-Plan Execution
+## ROME: Robust Query Optimization via Parallel Multi-Plan Execution
 
 ROME is a non-intrusive approach to robust query processing that can be used on top of any SQL execution engine. To reduce
 the risk of selecting highly sub-optimal query plans, we execute  multiple plans in parallel. Query processing finishes once the first
